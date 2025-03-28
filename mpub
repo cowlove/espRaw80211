@@ -1,0 +1,6 @@
+#!/bin/bash
+
+echo $@| mosquitto_pub -h rp1.local -t "$(basename `pwd`)/in" -l
+
+
+
