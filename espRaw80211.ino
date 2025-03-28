@@ -85,7 +85,7 @@ void printmac(const uint8_t* mac) {
 void get_mac(uint8_t *mac) {
   #ifdef ESP32
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
-  #else
+  #else 
     wifi_get_macaddr(STATION_IF, mac);
   #endif
 }
@@ -182,7 +182,7 @@ void Raw80211::send(const uint8_t *data, uint16_t len) {
   for (uint8_t count=0; count <= RETRIES; count++) {
     memcpy(buf+SEQ_NUM_OFFSET,(char*)&sequence, 2);
     #ifdef ESP32
-      esp_wifi_80211_tx(ESP_IF_WIFI_STA, buf, DATA_START_OFFSET + len + 2, true);
+      esp_wifi_80211_tx(WIFI_IF_STA, buf, DATA_START_OFFSET + len + 2, true);
     #else
       wifi_send_pkt_freedom(buf, DATA_START_OFFSET + len + 2, true);
     #endif
