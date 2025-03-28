@@ -29,7 +29,7 @@ ${MAIN_NAME}_csim:
 csim:	${MAIN_NAME}_csim
 
 fixtty:
-	stty -F ${UPLOAD_PORT} -hupcl -crtscts -echo raw 115200
+	stty -F ${UPLOAD_PORT} -hupcl -crtscts -echo raw 921600
 
 cat:    fixtty
 	cat ${UPLOAD_PORT}
@@ -45,7 +45,7 @@ uc:
 
 
 backtrace:
-	tr ' ' '\n' | /home/jim/.arduino15/packages/esp32/tools/xtensa-esp32-elf-gcc/*/bin/xtensa-esp32-elf-addr2line -f -i -e /tmp/mkESP/winglevlr_ttgo-t1/*.elf
+	tr ' ' '\n' | /home/jim/.arduino15/packages/esp32/tools/xtensa-esp32-elf-gcc/*/bin/xtensa-esp32-elf-addr2line -f -i -e /tmp/mkESP/${MAIN_NAME}_${CHIP}/*.elf
         
 
 

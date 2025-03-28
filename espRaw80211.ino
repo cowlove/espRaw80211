@@ -1,5 +1,7 @@
 #include "raw80211.h"
 
+#include <map>
+
 /*
  * Configuration part
  */
@@ -77,6 +79,13 @@ void printmac(const uint8_t* mac) {
   Serial.printf("%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
+uint64_t mac2uint64(const uint8_t* mac) {
+    uint64_t r = 0;
+    for(int i = 0; i < 6; i++) {
+        r = (r << 8) | mac[i];
+    }
+    return r;
+}
 
 /**
  * get_mac(*buf)
@@ -108,9 +117,55 @@ void wifi_sniffer_packet_handler(uint8_t *buff, uint16_t pkt_type_len) {
   const wifi_ieee80211_mac_hdr_t *hdr = &pk->hdr;
   const uint8_t *data = pt->payload;
 
+  struct Info { 
+    Info() {}
+    Info(double _ts, int _rssi, uint32_t _last) : ts(_ts), rssi(_rssi), lastSeen(_last) {}
+    double ts;
+    int rssi;
+    int count = 0;
+    uint32_t lastSeen;
+  };
+
+  static std::map<uint64_t,Info> beacons;
+
+  if (pk->hdr.frame_ctrl.subtype == 0x8) {
+    //printmac(pk->hdr.addr2);
+    uint64_t ts = *(((uint64_t *)pt->payload) + 3);
+    uint64_t mac = mac2uint64(pk->hdr.addr2);
+    if (!beacons.count(mac)) 
+        beacons[mac] = Info();
+    beacons[mac].ts = ts / 1000000.0;
+    beacons[mac].rssi = pt->rx_ctrl.rssi;
+    beacons[mac].lastSeen = millis();
+    beacons[mac].count++;
+    int x = 1;
+    printf("\033[%d;%dH", x, x++);
+    printf("\\   % 12s % 15s   (% 7s) (% 5s) (% 6s)  \\ \n", 
+        "Name", "Clock", "Strength", "Age", "Count");
+    printf("\033[%d;%dH", x, x++);
+    printf("\\---------------------------------------------------------------\\ \n");
+    for(auto p : beacons) {
+        if (p.second.count < 50) 
+            continue; 
+        printf("\e[?25l");
+        printf("\033[%d;%dH", x, x++);
+        int h = floor(p.second.ts / 3600);
+        int m = floor(p.second.ts - h * 3600) / 60;
+        int s = (int)p.second.ts % 60;
+        printf("\\   %012llx % 9d:%02d:%02d   (% 7d) (% 5.0fs) (% 6d)  \\ \n", 
+            p.first, h,m,s, 
+            p.second.rssi, min(9999.0, (millis() - p.second.lastSeen) / 1000.0), 
+            min(p.second.count, 99999));
+    }
+    printf("\033[%d;%dH", x, x++);
+    printf("\\---------------------------------------------------------------\\ \n"); 
+
+  }
+  return;
+
   // Only working on type 0x40 packets and filter for configured ESSID
-  if (pt->payload[0] != 0x40 || memcmp(Raw80211::_bssid, hdr->addr3, 6) != 0)
-    return;
+  //if (pt->payload[0] != 0x40 || memcmp(Raw80211::_bssid, hdr->addr3, 6) != 0)
+  //  return;
 
   // Extract payload length
   unsigned char *d = (unsigned char*)pt->payload + DATA_START_OFFSET;
@@ -124,7 +179,7 @@ void wifi_sniffer_packet_handler(uint8_t *buff, uint16_t pkt_type_len) {
   Serial.printf(" (RSSI: %d, Length: %d)\n", pt->rx_ctrl.rssi, len);
   dumphex((const uint8_t*)data+DATA_START_OFFSET+2, len, "  ");
   #endif
-  Raw80211::_receive_callback(hdr, pt->rx_ctrl.rssi, (const uint8_t*)data+DATA_START_OFFSET+2, len);
+  //Raw80211::_receive_callback(hdr, pt->rx_ctrl.rssi, (const uint8_t*)data+DATA_START_OFFSET+2, len);
 }
 
 
@@ -237,6 +292,8 @@ void Raw80211::start() {
 
 Raw80211 raw;
 void setup() {
+    Serial.begin(921600);
+    printf("OK\n");
     char bssid[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
     raw.init(bssid, 1);
     raw.start();
