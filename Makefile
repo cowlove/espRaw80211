@@ -29,7 +29,7 @@ ${MAIN_NAME}_csim:
 csim:	${MAIN_NAME}_csim
 
 fixtty:
-	stty -F ${UPLOAD_PORT} -hupcl -crtscts -echo raw 921600
+	stty -F ${UPLOAD_PORT} -hupcl -crtscts -echo raw 115200
 
 cat:    fixtty
 	cat ${UPLOAD_PORT}
