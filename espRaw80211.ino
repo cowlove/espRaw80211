@@ -33,7 +33,7 @@ void raw_packet_handler3(void *buf, wifi_promiscuous_pkt_type_t type) {
     const wifi_promiscuous_pkt_t *pt = (wifi_promiscuous_pkt_t*)buf; 
     const raw_beacon_packet_t *pk = (raw_beacon_packet_t*)pt->payload;
 
-    if (pk->subtype == 0x8 && pk->send_addr == 0x0000d36d6092) {
+    if (pk->subtype == 0x8 && pk->send_addr == 0x0000c15d7cc1) {
         int i = 0;
         pktLog[i].ssid = pk->send_addr;
         pktLog[i].seen2 = seen2;
@@ -130,7 +130,7 @@ void loop() {
         esp_task_wdt_reset();
 
         Info *b = &pktLog[0];
-        uint64_t goal = 0x1000000; // 0x1000000 is about 16 sec
+        uint64_t goal = 0x4000000; // 0x1000000 is about 16 sec
 
         int beaconDist = (int)(b->ts % goal);
         if (beaconDist > goal / 2) { 
@@ -140,7 +140,7 @@ void loop() {
         if (espDist > goal / 2) { 
             espDist -= goal;
         }
-        uint64_t ttg = 4 * goal - (b->ts % goal);
+        uint64_t ttg = 25 * goal - (b->ts % goal);
         if (ttg % goal < goal / 2)
             ttg += goal;
 
