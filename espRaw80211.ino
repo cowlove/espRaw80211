@@ -1,4 +1,4 @@
-//#include "jimlib.h"
+#include "jimlib.h"
 #ifndef ESP32
 #error Only the ESP32 is supported
 #endif 
@@ -28,12 +28,23 @@ struct Info {
 };
 
 Info pktLog[64];
-void raw_packet_handler3(void *buf, wifi_promiscuous_pkt_type_t type) {
+
+
+SPIFFSVariable<uint64_t> spiffsBeacon("/beaconX", 0);//0x000096ce8362);
+SPIFFSVariable<uint64_t> spiffsSleepTime("/sleepTimeX", 0);
+SPIFFSVariable<float> spiffsScale("/scaleX", 1.0);
+uint64_t intr_beacon; 
+int wifi_channel = 1;
+
+template<> string toString(const uint64_t &x) { return sfmt("%ullx", x); }
+template<> bool fromString(const string &s, uint64_t &x) { return sscanf(s.c_str(), "%ullx", &x) == 1; }
+
+void intr_oneShot(void *buf, wifi_promiscuous_pkt_type_t type) {
     uint64_t seen2 = micros();
     const wifi_promiscuous_pkt_t *pt = (wifi_promiscuous_pkt_t*)buf; 
     const raw_beacon_packet_t *pk = (raw_beacon_packet_t*)pt->payload;
 
-    if (pk->subtype == 0x8 && pk->send_addr == 0x0000c15d7cc1) {
+    if (pk->subtype == 0x8 && pk->send_addr == intr_beacon) {
         int i = 0;
         pktLog[i].ssid = pk->send_addr;
         pktLog[i].seen2 = seen2;
@@ -45,8 +56,9 @@ void raw_packet_handler3(void *buf, wifi_promiscuous_pkt_type_t type) {
     }
 }
 
-int score(const Info &i) { return (110 - i.rssi) * i.count; }
-void raw_packet_handler(void *buf, wifi_promiscuous_pkt_type_t type) {
+//int score(const Info &i) { return (110 - i.rssi) * i.count; }
+int score(const Info &i) { return i.count; }
+void intr_collect(void *buf, wifi_promiscuous_pkt_type_t type) {
     uint64_t seen2 = micros();
     const wifi_promiscuous_pkt_t *pt = (wifi_promiscuous_pkt_t*)buf; 
     const raw_beacon_packet_t *pk = (raw_beacon_packet_t*)pt->payload;
@@ -75,7 +87,7 @@ void raw_packet_handler(void *buf, wifi_promiscuous_pkt_type_t type) {
                     worst = i;
             }
             pktLog[worst].ssid = pk->send_addr;
-            raw_packet_handler(buf, type);
+            intr_collect(buf, type);
             return;
         }
         int best = 0;
@@ -91,81 +103,152 @@ void raw_packet_handler(void *buf, wifi_promiscuous_pkt_type_t type) {
 void pretty_packet_handler(void *buf, wifi_promiscuous_pkt_type_t type);
 
 void setupPromisc() { 
-    int wifi_channel = 1;
+    intr_beacon = spiffsBeacon; 
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_stop();
+    esp_wifi_deinit();
+    esp_wifi_init(&cfg);
+    esp_wifi_start();
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_disconnect();
+    esp_wifi_set_channel(wifi_channel, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_promiscuous(1);
+    wifi_promiscuous_filter_t filter = {WIFI_PROMIS_FILTER_MASK_MGMT};
+    esp_wifi_set_promiscuous_filter(&filter);
+    esp_wifi_set_promiscuous_rx_cb(intr_oneShot);
+}
+
+JStuff j;
+
+void setupPromisc2() { 
+    intr_beacon = spiffsBeacon;
+    esp_wifi_set_promiscuous(1);
+    wifi_promiscuous_filter_t filter = {WIFI_PROMIS_FILTER_MASK_MGMT};
+    esp_wifi_set_promiscuous_filter(&filter); 
+    esp_wifi_set_promiscuous_rx_cb(intr_collect);
+}
+
+void setup() {
+    j.begin();
+    printf("%09.3f setup() waiting for %llx\n", millis()/1000.0, spiffsBeacon.read());
+    //setupPromisc();
+    //j.onConn = ([]() { setupPromisc2(); });
+    //j.begin();
+    esp_task_wdt_init(25, true);
+    esp_task_wdt_add(NULL);
+    setupPromisc();
+}
+
+
+//uint64_t goal = 0x4000000; // 0x1000000 is about 16 sec
+//uint64_t goal = 0x1000000; // 0x1000000 is about 16 sec
+uint64_t goal = 60 * 1000000;
+int goalCount = 1;
+
+uint64_t startUs = 0;
+void loop() {
+    esp_task_wdt_reset();
+    if (pktLog[0].count == 0 && millis() - startUs / 1000 < 10000) {
+        delay(1);
+        return;
+    }
+    Info resultPkt = pktLog[0];
+
+    esp_wifi_set_promiscuous(0);
+    esp_wifi_set_promiscuous_rx_cb(NULL);
+    esp_wifi_stop();
+    esp_wifi_deinit();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_wifi_init(&cfg);
     esp_wifi_start();
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_disconnect();
-    esp_wifi_set_promiscuous(1);
-    wifi_promiscuous_filter_t filter = {WIFI_PROMIS_FILTER_MASK_MGMT};
-    esp_wifi_set_promiscuous_filter(&filter); 
-    esp_wifi_set_promiscuous_rx_cb(raw_packet_handler3);
     esp_wifi_set_channel(wifi_channel, WIFI_SECOND_CHAN_NONE);
-}
-
-//JStuff j;
-
-void setupPromisc2() { 
-    esp_wifi_set_promiscuous(1);
     wifi_promiscuous_filter_t filter = {WIFI_PROMIS_FILTER_MASK_MGMT};
-    esp_wifi_set_promiscuous_filter(&filter); 
-    esp_wifi_set_promiscuous_rx_cb(raw_packet_handler);
-}
+    esp_wifi_set_promiscuous_filter(&filter);
+    esp_wifi_set_promiscuous_rx_cb(intr_collect);
+    esp_wifi_set_promiscuous(1);
+    delay(250);
+    esp_wifi_set_promiscuous(0);
+    esp_wifi_set_promiscuous_rx_cb(NULL);
 
-void setup() {
-    printf("%09.3f setup()\n", millis()/1000.0);
-    //setupPromisc();
-    //j.onConn = ([]() { setupPromisc2(); });
+    int best = 0, i;
+    for(i = 0; i < sizeof(pktLog)/sizeof(pktLog[0]); i++) {
+        if (pktLog[i].ssid != 0 && score(pktLog[i]) >= score(pktLog[best]))
+            best = i;
+    }
+    OUT("%09.3f best: %02d %012llx %3d %6d %016llx %016llx", 
+        millis()/1000.0, best, pktLog[best].ssid, pktLog[best].rssi, pktLog[best].count);
+    
+    
+    //spiffsBeacon = pktLog[best].ssid;
+    spiffsBeacon = 0x96ce8362;
+
+    esp_wifi_stop();
+    esp_wifi_deinit();
+    //wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+    //esp_wifi_start();
+    //esp_wifi_set_mode(WIFI_MODE_STA);
+    //esp_wifi_disconnect();
+    j.mqtt.active = false;
+    j.jw.enabled = false;
     //j.begin();
-    esp_task_wdt_init(5, true);
-    esp_task_wdt_add(NULL);
+    j.run();
+    esp_wifi_set_promiscuous_rx_cb(NULL);
+
+
+    Info *b = &resultPkt;
+    b->seen -= 0; //startUs; // b->seen seems to be counting from esp_wifi_init calls, not from boot 
+    b->seen2 -= startUs;
+    uint64_t pktRxTime = b->seen2;
+
+    int beaconDist = (int)(b->ts % goal);
+    if (beaconDist > goal / 2) { 
+        beaconDist -= goal;
+    }
+    int espDist = (int)(pktRxTime % goal);
+    if (espDist > goal / 2) { 
+        espDist -= goal;
+    }
+    uint64_t ttg = goalCount * goal - (b->ts % goal);
+    if (ttg % goal < goal / 2)
+        ttg += goal;
+
+    int usecLate = beaconDist - espDist;
+    float percentLate = abs(100.0 * usecLate / spiffsSleepTime.read());
+
+    static int loopCount = 0;
+    loopCount++;
+    if (esp_rom_get_reset_reason(0) == 5 || loopCount > 1) { 
+        OUT("%09.3f slept %.6f mac %012llx %d goal %x beacon %08llx (%d) esp %08llx (%d) difference %d late (%.3f%%) reset reason %d scale %f", 
+            millis()/1000.0, spiffsSleepTime.read()/1000000.0, b->ssid, b->rssi, (int)goal, b->ts % goal, beaconDist, 
+            pktRxTime % goal, espDist, 
+            usecLate, percentLate , esp_rom_get_reset_reason(0), spiffsScale.read());
+        
+        spiffsScale = spiffsScale - (1.0 * usecLate / spiffsSleepTime) * 0.8;
+        OUT("%09.3f scale %f", millis()/1000.0, spiffsScale.read());
+        spiffsScale = min(1.1F, max(0.9F, spiffsScale.read()));
+    } else {
+        spiffsScale = 1.004;
+    }
+    uint64_t us = (ttg - (micros() - startUs - pktRxTime)) * spiffsScale;
+    OUT("%09.3f deep sleep %.1f sec, scale %f", millis()/1000.0, us / 1000000.0, spiffsScale.read());
+    fflush(stdout);
+    uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
+    
+    // freshen up sleep calculation
+    us = (ttg - (micros() - startUs - pktRxTime)) * spiffsScale;
+    spiffsSleepTime = us;
+    esp_sleep_enable_timer_wakeup(us);
+    esp_deep_sleep_start();        
+
+    pktLog[0].count = 0;
+    startUs = micros();
     setupPromisc();
 }
-
-void loop() {
-    esp_task_wdt_reset();
-    if (pktLog[0].count > 0) { 
-        esp_wifi_set_promiscuous_rx_cb(NULL);
-        esp_task_wdt_reset();
-
-        Info *b = &pktLog[0];
-        uint64_t goal = 0x4000000; // 0x1000000 is about 16 sec
-
-        int beaconDist = (int)(b->ts % goal);
-        if (beaconDist > goal / 2) { 
-            beaconDist -= goal;
-        }
-        int espDist = (int)(b->seen2 % goal);
-        if (espDist > goal / 2) { 
-            espDist -= goal;
-        }
-        uint64_t ttg = 25 * goal - (b->ts % goal);
-        if (ttg % goal < goal / 2)
-            ttg += goal;
-
-        uint64_t us = ttg - (micros() - b->seen);
-
-        if (esp_rom_get_reset_reason(0) == 5) {
-        printf("%09.3f sleep %.3f mac %012llx %d goal %x beacon %08llx (%d) esp %08llx (%d) difference %d reset reason %d\n", 
-            millis()/1000.0, us/1000000.0, b->ssid, b->rssi, (int)goal, b->ts % goal, beaconDist, b->seen2 % goal, espDist, 
-            espDist - beaconDist, esp_rom_get_reset_reason(0));
-        }
-        printf("%09.3f deep sleep %.2f sec\n", millis()/1000.0, us / 1000000.0);
-
-        fflush(stdout);
-        uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
-        
-        us = ttg - (micros() - b->seen);
-        esp_sleep_enable_timer_wakeup(us);
-        esp_deep_sleep_start();        
-        pktLog[0].count = 0;
-        setupPromisc();
-    }
-    delay(1);
-}
 #include <map>
-#if 0
+#if 1
 void pretty_packet_handler(void *buf, wifi_promiscuous_pkt_type_t type) {
     const wifi_promiscuous_pkt_t *pt = (wifi_promiscuous_pkt_t*)buf; 
     const raw_beacon_packet_t *pk = (raw_beacon_packet_t*)pt->payload;
@@ -180,7 +263,8 @@ void pretty_packet_handler(void *buf, wifi_promiscuous_pkt_type_t type) {
         beacons[mac] = Info();
     beacons[mac].ts = ts;
     beacons[mac].rssi = pt->rx_ctrl.rssi;
-    beacons[mac].lastSeen = microseconds();
+    beacons[mac].seen2 = micros();
+    beacons[mac].seen = pt->rx_ctrl.timestamp;
     beacons[mac].count++;
 
     int maxCount = 0;
@@ -204,7 +288,7 @@ void pretty_packet_handler(void *buf, wifi_promiscuous_pkt_type_t type) {
         int s = (int)p.second.ts % 60;
         printf("\\   %012llx % 9d:%02d:%02d   (% 7d) (% 5.0fs) (% 6d)  \\ \n", 
             p.first, h,m,s, 
-            p.second.rssi, min(9999.0, (millis() - p.second.lastSeen) / 1000.0), 
+            p.second.rssi, min(9999.0, (micros() - p.second.seen) / 1000000.0), 
             min(p.second.count, 99999));
     }
     printf("\033[%d;%dH", x*tilt, x++);
