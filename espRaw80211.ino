@@ -33,8 +33,10 @@ Info pktLog[64];
 SPIFFSVariable<uint64_t> spiffsBeacon("/beaconX", 0);//0x000096ce8362);
 SPIFFSVariable<uint64_t> spiffsSleepTime("/sleepTimeX", 0);
 SPIFFSVariable<float> spiffsScale("/scaleX", 1.0);
+SPIFFSVariable<uint64_t> spiffsCurrentGoal("/currentGoal", 0);
+SPIFFSVariable<int> spiffsCurrentRep("/currentRep", 0);
 uint64_t intr_beacon; 
-int wifi_channel = 1;
+int wifi_channel = 4;
 
 template<> string toString(const uint64_t &x) { return sfmt("%ullx", x); }
 template<> bool fromString(const string &s, uint64_t &x) { return sscanf(s.c_str(), "%ullx", &x) == 1; }
@@ -118,7 +120,7 @@ void setupPromisc() {
     esp_wifi_set_promiscuous_rx_cb(intr_oneShot);
 }
 
-JStuff j;
+//JStuff j;
 
 void setupPromisc2() { 
     intr_beacon = spiffsBeacon;
@@ -128,47 +130,31 @@ void setupPromisc2() {
     esp_wifi_set_promiscuous_rx_cb(intr_collect);
 }
 
+
+void println(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    printf("%09.3f ", millis()/1000.0);
+    vprintf(fmt, args);
+    printf("\n");
+}
+#define OUT println
+//JStuff j;
 void setup() {
-    j.begin();
-    printf("%09.3f setup() waiting for %llx\n", millis()/1000.0, spiffsBeacon.read());
-    //setupPromisc();
-    //j.onConn = ([]() { setupPromisc2(); });
     //j.begin();
+    //Serial.begin(921600);
+    printf("%09.3f setup() waiting for %llx\n", millis()/1000.0, spiffsBeacon.read());
     esp_task_wdt_init(25, true);
     esp_task_wdt_add(NULL);
     setupPromisc();
 }
 
 
-//uint64_t goal = 0x4000000; // 0x1000000 is about 16 sec
-//uint64_t goal = 0x1000000; // 0x1000000 is about 16 sec
-uint64_t goal = 600 * 1000000;
-int goalCount = 1;
-uint64_t startUs = 0;
-#define LP printf("%09.3f ", millis()/1000.0),printf
+static uint64_t startUs = 0;
+static int loopCount = 0;
 
-int checks = 0;
-void check(int ms) { 
-    uint32_t startMs = millis();
-    checks++;
-    int s;
-    while((s = WiFi.status()) != WL_CONNECTED && millis() - startMs < ms) {
-        printf("WiFi.status() %d\n", s);
-        delay(100);
-        wdtReset();
-    }
-    if (WiFi.status() == WL_CONNECTED) { 
-        LP("connected check=%d\n", checks);
-        delay(2000);
-        ESP.restart();
-
-    }
-    LP("not connected after %d\n", checks);
-
-}
-
-#define CK(x) err = (x); if (err != ESP_OK) printf("Error %d line %d\n", err, __LINE__)
 void loop() {
+    loopCount++;
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_task_wdt_reset();
     if (pktLog[0].count == 0 && millis() - startUs / 1000 < 10000) {
@@ -176,51 +162,48 @@ void loop() {
         return;
     }
     Info resultPkt = pktLog[0];
-
-    esp_wifi_set_promiscuous(0);
-    esp_wifi_set_promiscuous_rx_cb(NULL);
-    esp_wifi_stop();
-    esp_wifi_deinit();
-    esp_wifi_init(&cfg);
-    esp_wifi_start();
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_disconnect();
-    esp_wifi_set_channel(wifi_channel, WIFI_SECOND_CHAN_NONE);
-    wifi_promiscuous_filter_t filter = {WIFI_PROMIS_FILTER_MASK_MGMT};
-    esp_wifi_set_promiscuous_filter(&filter);
-    esp_wifi_set_promiscuous_rx_cb(intr_collect);
-    esp_wifi_set_promiscuous(1);
-    delay(250);
-    esp_wifi_set_promiscuous(0);
-    esp_wifi_set_promiscuous_rx_cb(NULL);
-
-    int best = 0, i;
-    for(i = 0; i < sizeof(pktLog)/sizeof(pktLog[0]); i++) {
-        if (pktLog[i].ssid != 0 && score(pktLog[i]) >= score(pktLog[best]))
-            best = i;
-    }
-    OUT("%09.3f best: %02d %012llx %3d %6d %016llx %016llx", 
-        millis()/1000.0, best, pktLog[best].ssid, pktLog[best].rssi, pktLog[best].count);
-    
-    
-    //spiffsBeacon = pktLog[best].ssid;
-    spiffsBeacon = 0x96ce8362;
-
-    esp_wifi_stop();
-    esp_wifi_deinit();
-    //wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-    //esp_wifi_start();
-    //esp_wifi_set_mode(WIFI_MODE_STA);
-    //esp_wifi_disconnect();
-    j.mqtt.active = false;
-    j.jw.enabled = false;
-    //j.begin();
-    j.run();
-    esp_wifi_set_promiscuous_rx_cb(NULL);
-
-
     Info *b = &resultPkt;
+
+    if (resultPkt.count == 0) {
+        OUT("No beacon packet received, picking new beacon", millis()); 
+        esp_wifi_set_promiscuous(0);
+        esp_wifi_set_promiscuous_rx_cb(NULL);
+        esp_wifi_stop();
+        esp_wifi_deinit();
+        esp_wifi_init(&cfg);
+        esp_wifi_start();
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_wifi_disconnect();
+        esp_wifi_set_channel(wifi_channel, WIFI_SECOND_CHAN_NONE);
+        wifi_promiscuous_filter_t filter = {WIFI_PROMIS_FILTER_MASK_MGMT};
+        esp_wifi_set_promiscuous_filter(&filter);
+        esp_wifi_set_promiscuous_rx_cb(intr_collect);
+        esp_wifi_set_promiscuous(1);
+        delay(250);
+        esp_wifi_set_promiscuous(0);
+        esp_wifi_set_promiscuous_rx_cb(NULL);
+
+        int best = 0, i;
+        for(i = 0; i < sizeof(pktLog)/sizeof(pktLog[0]); i++) {
+            if (pktLog[i].ssid != 0 && score(pktLog[i]) >= score(pktLog[best]))
+                best = i;
+        }
+        OUT("best beacon: %02d %012llx %3d %6d %016llx %016llx", 
+            best, pktLog[best].ssid, pktLog[best].rssi, pktLog[best].count);
+        
+        esp_wifi_stop();
+        esp_wifi_deinit();
+        esp_wifi_init(&cfg);
+        esp_wifi_set_promiscuous_rx_cb(NULL);
+        b = &pktLog[best];
+        spiffsBeacon = b->ssid;
+    }
+
+    if (esp_rom_get_reset_reason(0) != 5) {
+        spiffsCurrentGoal = 2.4 * 1000000;
+        spiffsCurrentRep = 0;
+    }
+    uint64_t goal = spiffsCurrentGoal;
     b->seen -= 0; //startUs; // b->seen seems to be counting from esp_wifi_init calls, not from boot 
     b->seen2 -= startUs;
     uint64_t pktRxTime = b->seen2;
@@ -233,29 +216,36 @@ void loop() {
     if (espDist > goal / 2) { 
         espDist -= goal;
     }
-    uint64_t ttg = goalCount * goal - (b->ts % goal);
-    if (ttg % goal < goal / 2)
-        ttg += goal;
 
     int usecLate = beaconDist - espDist;
     float percentLate = abs(100.0 * usecLate / spiffsSleepTime.read());
 
-    static int loopCount = 0;
-    loopCount++;
     if (esp_rom_get_reset_reason(0) == 5 || loopCount > 1) { 
-        OUT("%09.3f slept %.6f mac %012llx %d goal %x beacon %08llx (%d) esp %08llx (%d) difference %d late (%.3f%%) reset reason %d scale %f", 
-            millis()/1000.0, spiffsSleepTime.read()/1000000.0, b->ssid, b->rssi, (int)goal, b->ts % goal, beaconDist, 
-            pktRxTime % goal, espDist, 
-            usecLate, percentLate , esp_rom_get_reset_reason(0), spiffsScale.read());
+        OUT("slept %lld (%.1fs) rssi %d goal %.2fs rep %d beacon offset %d esp offset %d difference %d late (%.3f%%) scale %f", 
+            spiffsSleepTime.read(), spiffsSleepTime.read()/1000000.0, b->rssi, 
+            goal / 1000000.0, spiffsCurrentRep.read(), beaconDist, espDist, 
+            usecLate, percentLate, spiffsScale.read());
         
-        spiffsScale = spiffsScale - (1.0 * usecLate / spiffsSleepTime) * 0.6;
-        OUT("%09.3f scale %f", millis()/1000.0, spiffsScale.read());
+        spiffsScale = spiffsScale - (1.0 * usecLate / spiffsSleepTime) * 0.3;
         spiffsScale = min(1.1F, max(0.9F, spiffsScale.read()));
+        
+        // set for next sleep result
+        spiffsCurrentRep = spiffsCurrentRep + 1;
+        if (spiffsCurrentRep > 50 && b->ts % goal == b->ts % (goal * 2)) {
+            spiffsCurrentGoal = spiffsCurrentGoal * 5;
+            spiffsCurrentRep = 0;
+        }        
     } else {
         spiffsScale = 1.004;
     }
+    spiffsScale = 1.0; // TMP disable scaling for data collection
+
+    goal = spiffsCurrentGoal; // might have changed
+    uint64_t ttg = goal - (b->ts % goal);
+    if (ttg % goal < goal / 2)
+        ttg += goal;
     uint64_t us = (ttg - (micros() - startUs - pktRxTime)) * spiffsScale;
-    OUT("%09.3f deep sleep %.1f sec, scale %f", millis()/1000.0, us / 1000000.0, spiffsScale.read());
+    OUT("deep sleep %.1f sec, goal %.1f scale %f", us / 1000000.0, goal / 1000000.0, spiffsScale.read());
     fflush(stdout);
     uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
     
@@ -270,11 +260,31 @@ void loop() {
     setupPromisc();
 }
 
+int checks = 0;
+void check(int ms) { 
+    uint32_t startMs = millis();
+    checks++;
+    int s;
+    while((s = WiFi.status()) != WL_CONNECTED && millis() - startMs < ms) {
+        printf("WiFi.status() %d\n", s);
+        delay(100);
+        wdtReset();
+    }
+    if (WiFi.status() == WL_CONNECTED) { 
+        OUT("connected check=%d", checks);
+        delay(2000);
+        ESP.restart();
+
+    }
+    OUT("not connected after %d", checks);
+}
+
+#define CK(x) err = (x); if (err != ESP_OK) printf("Error %d line %d\n", err, __LINE__)
 void loop2() { // side investigation, try different wifi init methods to reliably connect 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t err;
-    j.mqtt.active = false;
-    LP("connecting...\n");
+    //j.mqtt.active = false;
+    OUT("connecting...\n");
 
     WiFi.begin("Station 54", "Local1747");
     check(20000);
@@ -301,7 +311,7 @@ void loop2() { // side investigation, try different wifi init methods to reliabl
     WiFi.begin("Station 54", "Local1747");
     check(10000);
 
-    LP("failed, rebooting\n");
+    OUT("failed, rebooting\n");
     ESP.restart();
 
 }
