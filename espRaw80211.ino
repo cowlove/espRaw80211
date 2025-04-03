@@ -142,11 +142,34 @@ void setup() {
 
 //uint64_t goal = 0x4000000; // 0x1000000 is about 16 sec
 //uint64_t goal = 0x1000000; // 0x1000000 is about 16 sec
-uint64_t goal = 60 * 1000000;
+uint64_t goal = 600 * 1000000;
 int goalCount = 1;
-
 uint64_t startUs = 0;
+#define LP printf("%09.3f ", millis()/1000.0),printf
+
+int checks = 0;
+void check(int ms) { 
+    uint32_t startMs = millis();
+    checks++;
+    int s;
+    while((s = WiFi.status()) != WL_CONNECTED && millis() - startMs < ms) {
+        printf("WiFi.status() %d\n", s);
+        delay(100);
+        wdtReset();
+    }
+    if (WiFi.status() == WL_CONNECTED) { 
+        LP("connected check=%d\n", checks);
+        delay(2000);
+        ESP.restart();
+
+    }
+    LP("not connected after %d\n", checks);
+
+}
+
+#define CK(x) err = (x); if (err != ESP_OK) printf("Error %d line %d\n", err, __LINE__)
 void loop() {
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_task_wdt_reset();
     if (pktLog[0].count == 0 && millis() - startUs / 1000 < 10000) {
         delay(1);
@@ -158,7 +181,6 @@ void loop() {
     esp_wifi_set_promiscuous_rx_cb(NULL);
     esp_wifi_stop();
     esp_wifi_deinit();
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_wifi_init(&cfg);
     esp_wifi_start();
     esp_wifi_set_mode(WIFI_MODE_STA);
@@ -226,7 +248,7 @@ void loop() {
             pktRxTime % goal, espDist, 
             usecLate, percentLate , esp_rom_get_reset_reason(0), spiffsScale.read());
         
-        spiffsScale = spiffsScale - (1.0 * usecLate / spiffsSleepTime) * 0.8;
+        spiffsScale = spiffsScale - (1.0 * usecLate / spiffsSleepTime) * 0.6;
         OUT("%09.3f scale %f", millis()/1000.0, spiffsScale.read());
         spiffsScale = min(1.1F, max(0.9F, spiffsScale.read()));
     } else {
@@ -247,6 +269,43 @@ void loop() {
     startUs = micros();
     setupPromisc();
 }
+
+void loop2() { // side investigation, try different wifi init methods to reliably connect 
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_err_t err;
+    j.mqtt.active = false;
+    LP("connecting...\n");
+
+    WiFi.begin("Station 54", "Local1747");
+    check(20000);
+    WiFi.disconnect();
+
+    for(int i = 0; i < 3; i++) { 
+        WiFi.begin("Station 54", "Local1747");
+        check(2000);
+        WiFi.disconnect();
+    }
+    WiFi.begin("Station 54", "Local1747");
+    check(10000);
+    WiFi.disconnect();
+
+    WiFi.begin("Station 54", "Local1747");
+    check(20000);
+    //CK(esp_wifi_stop());
+    WiFi.disconnect();
+    CK(esp_wifi_stop());
+    CK(esp_wifi_deinit());
+    CK(esp_wifi_init(&cfg));
+    CK(esp_wifi_start());
+    CK(WiFi.disconnect());
+    WiFi.begin("Station 54", "Local1747");
+    check(10000);
+
+    LP("failed, rebooting\n");
+    ESP.restart();
+
+}
+
 #include <map>
 #if 1
 void pretty_packet_handler(void *buf, wifi_promiscuous_pkt_type_t type) {
