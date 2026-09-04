@@ -27,7 +27,9 @@ select the beacon with the highest observation count and persist its address in
    starts promiscuous capture with `intr_oneShot()` for the persisted beacon.
 2. `loop()` waits briefly for that beacon. If it is not seen, it switches to
    `intr_collect()`, collects beacon records for about 250 ms, chooses the most
-   frequently observed beacon, and persists its address.
+   frequently observed beacon, and persists its address. This is experimental
+   bootstrap behavior only; it is not a valid fallback for a synchronized
+   multi-device system.
 3. The selected beacon timestamp and local receive time are reduced modulo a
    persisted rendezvous period (`/currentGoal`). The difference is reported as
    the timing error between the beacon clock and the ESP32 clock.
@@ -63,6 +65,23 @@ than 50 repetitions, if the beacon phase meets the existing boundary test, it
 multiplies the rendezvous goal by five and resets the repetition counter. This
 is intentional historical behavior, not a production scheduling policy; it
 reduces the observation frequency as the run progresses.
+
+## Intended rendezvous model
+
+For an actual multi-device rendezvous, the beacon BSSID, channel, and modulo
+interval would be assigned in advance and distributed to every device. Each
+device could then independently use the same beacon TSF boundary as its wake
+reference; no device-to-device synchronization transmission would be needed.
+
+The automatic beacon selection above exists only so this standalone experiment
+can start without configuration and gather timing data. It selects the most
+frequently observed beacon in a short collection window (a visibility measure,
+not a guaranteed strongest-signal choice). A coordinated device must not
+silently replace its assigned beacon after a missed observation, since peers
+could then use different clocks. If the assigned beacon is absent, the device
+has no trusted phase reference for that cycle: it must retain its prior
+calibration, sleep or retry, and wait until the assigned beacon is heard again.
+There is deliberately no recovery protocol in this prototype.
 
 ## Build notes
 

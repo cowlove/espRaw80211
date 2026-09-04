@@ -174,6 +174,12 @@ void loop() {
     Info *b = &resultPkt;
 
     if (resultPkt.count == 0) {
+        // Bootstrap-only discovery for standalone timing experiments. A real
+        // rendezvous deployment would use a pre-assigned BSSID/channel and
+        // must not switch to an unrelated AP after a missed beacon: peers
+        // could then follow different TSF clocks. Without its assigned beacon
+        // a coordinated device must retain calibration and retry later; this
+        // prototype selects a visible beacon so data collection can continue.
         OUT("No beacon packet received, picking new beacon", millis()); 
         esp_wifi_set_promiscuous(0);
         esp_wifi_set_promiscuous_rx_cb(NULL);
