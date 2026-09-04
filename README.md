@@ -41,8 +41,16 @@ The sketch stores beacon identity, rendezvous goal, sleep time, scale, and a
 repetition counter through `SPIFFSVariable`. Older or erased state can contain
 zero values. In particular, a zero `/currentGoal` would cause an integer
 divide-by-zero at the modulo operation, so the code restores the prototype's
-2,400,000-microsecond default before using it. A zero sleep interval is also
+60,000,000-microsecond default before using it. A zero sleep interval is also
 handled when calculating the reported percentage error.
+
+The rendezvous goal is the repeating period used to calculate the next beacon
+clock boundary; it is not merely the amount of time spent asleep. The actual
+sleep interval is the remaining time until that boundary after capture and
+processing overhead. The initial 60-second period leaves room for boot,
+promiscuous capture, logging, and synchronization while still providing a
+useful rendezvous cadence. A valid persisted goal is retained across deep
+sleep.
 
 ## Build notes
 

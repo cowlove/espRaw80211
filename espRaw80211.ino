@@ -37,6 +37,7 @@ SPIFFSVariable<uint64_t> spiffsCurrentGoal("/currentGoal", 0);
 SPIFFSVariable<int> spiffsCurrentRep("/currentRep", 0);
 uint64_t intr_beacon; 
 int wifi_channel = 4;
+static constexpr uint64_t DEFAULT_RENDEZVOUS_US = 60ULL * 1000000ULL;
 
 
 void intr_oneShot(void *buf, wifi_promiscuous_pkt_type_t type) {
@@ -141,6 +142,9 @@ void println(const char *fmt, ...) {
 void setup() {
     //j.begin();
     //Serial.begin(921600);
+    // SPIFFSVariable is backed by LittleFS in jimlib.  Mount it before any
+    // persisted variable is read or written.
+    SPIFFSVariableESP32Base::begin();
     printf("%09.3f setup() waiting for %llx\n", millis()/1000.0, spiffsBeacon.read());
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
         esp_task_wdt_config_t c;
@@ -205,14 +209,14 @@ void loop() {
     }
 
     if (esp_rom_get_reset_reason(0) != 5) {
-        spiffsCurrentGoal = 2.4 * 1000000;
+        spiffsCurrentGoal = DEFAULT_RENDEZVOUS_US;
         spiffsCurrentRep = 0;
     }
     uint64_t goal = spiffsCurrentGoal;
     // A freshly erased SPIFFS (or an older image) can leave this persisted
     // value at zero.  Do not use it as a modulo divisor.
     if (goal == 0) {
-        goal = 2400000;
+        goal = DEFAULT_RENDEZVOUS_US;
         spiffsCurrentGoal = goal;
         spiffsCurrentRep = 0;
     }
