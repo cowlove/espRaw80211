@@ -8,9 +8,13 @@ ifeq ($(BOARD),esp32s3)
 	UPLOAD_PORT ?= /dev/ttyACM0
 else 
 	BUILD_EXTRA_FLAGS += -DI2S
+        BUILD_MEMORY_TYPE=qio_qspi
 endif
+ALIBS=${HOME}/Arduino/libraries
+EXCLUDE_DIRS=${ALIBS}/lvgl|${ALIBS}/LovyanGFX|${ALIBS}/esp32csim
 
-#GIT_VERSION := "$(shell git describe --abbrev=4 --dirty --always --tags)"
+
+GIT_VERSION := "$(shell git describe --abbrev=4 --dirty --always --tags)"
 BUILD_EXTRA_FLAGS += -DGIT_VERSION=\"$(GIT_VERSION)\"
 BUILD_EXTRA_FLAGS += -DESP32CORE_V2
 include ${HOME}/Arduino/libraries/makeEspArduino/makeEspArduino.mk
@@ -45,7 +49,7 @@ uc:
 
 
 backtrace:
-	tr ' ' '\n' | /home/jim/.arduino15/packages/esp32/tools/xtensa-esp32-elf-gcc/*/bin/xtensa-esp32-elf-addr2line -f -i -e /tmp/mkESP/${MAIN_NAME}_${CHIP}/*.elf
+	tr ' ' '\n' | /home/jim/.arduino15/packages/esp32/tools/esp-x32/*/bin/xtensa-esp32-elf-addr2line -f -i -e /tmp/mkESP/${MAIN_NAME}_${CHIP}/*.elf
         
 
 

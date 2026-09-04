@@ -38,8 +38,6 @@ SPIFFSVariable<int> spiffsCurrentRep("/currentRep", 0);
 uint64_t intr_beacon; 
 int wifi_channel = 4;
 
-template<> string toString(const uint64_t &x) { return sfmt("%ullx", x); }
-template<> bool fromString(const string &s, uint64_t &x) { return sscanf(s.c_str(), "%ullx", &x) == 1; }
 
 void intr_oneShot(void *buf, wifi_promiscuous_pkt_type_t type) {
     uint64_t seen2 = micros();
@@ -144,8 +142,15 @@ void setup() {
     //j.begin();
     //Serial.begin(921600);
     printf("%09.3f setup() waiting for %llx\n", millis()/1000.0, spiffsBeacon.read());
-    esp_task_wdt_init(25, true);
-    esp_task_wdt_add(NULL);
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+        esp_task_wdt_config_t c;
+        c.timeout_ms = (25)*1000;
+        c.idle_core_mask = 0x1;
+        c.trigger_panic = true;
+        esp_task_wdt_deinit();
+        esp_task_wdt_init(&c);  // include jimlib.h last or this will cause compile errors in other headers
+        esp_task_wdt_add(NULL);
+#endif
     setupPromisc();
 }
 
@@ -204,6 +209,13 @@ void loop() {
         spiffsCurrentRep = 0;
     }
     uint64_t goal = spiffsCurrentGoal;
+    // A freshly erased SPIFFS (or an older image) can leave this persisted
+    // value at zero.  Do not use it as a modulo divisor.
+    if (goal == 0) {
+        goal = 2400000;
+        spiffsCurrentGoal = goal;
+        spiffsCurrentRep = 0;
+    }
     b->seen -= 0; //startUs; // b->seen seems to be counting from esp_wifi_init calls, not from boot 
     b->seen2 -= startUs;
     uint64_t pktRxTime = b->seen2;
@@ -218,7 +230,8 @@ void loop() {
     }
 
     int usecLate = beaconDist - espDist;
-    float percentLate = abs(100.0 * usecLate / spiffsSleepTime.read());
+    uint64_t sleepTime = spiffsSleepTime.read();
+    float percentLate = sleepTime ? abs(100.0 * usecLate / sleepTime) : 0.0;
 
     if (esp_rom_get_reset_reason(0) == 5 || loopCount > 1) { 
         OUT("slept %lld (%.1fs) rssi %d goal %.2fs rep %d beacon offset %d esp offset %d difference %d late (%.3f%%) scale %f", 
