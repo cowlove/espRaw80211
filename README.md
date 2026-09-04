@@ -52,6 +52,18 @@ promiscuous capture, logging, and synchronization while still providing a
 useful rendezvous cadence. A valid persisted goal is retained across deep
 sleep.
 
+When a previous sleep interval is available, the sketch enables the
+experimental `scale` feedback loop. It estimates fractional sleep-clock error
+from the observed beacon phase error, applies 30% of that correction, clamps
+the coefficient to 0.9--1.1, and applies it to the next sleep interval. The
+first wake is not used for calibration if no prior sleep interval exists.
+
+The prototype also retains a separate data-collection experiment: after more
+than 50 repetitions, if the beacon phase meets the existing boundary test, it
+multiplies the rendezvous goal by five and resets the repetition counter. This
+is intentional historical behavior, not a production scheduling policy; it
+reduces the observation frequency as the run progresses.
+
 ## Build notes
 
 The Makefile targets the original ESP32 by default:

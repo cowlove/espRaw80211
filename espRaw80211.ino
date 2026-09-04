@@ -243,8 +243,12 @@ void loop() {
             goal / 1000000.0, spiffsCurrentRep.read(), beaconDist, espDist, 
             usecLate, percentLate, spiffsScale.read());
         
-        spiffsScale = spiffsScale - (1.0 * usecLate / spiffsSleepTime) * 0.3;
-        spiffsScale = min(1.1F, max(0.9F, spiffsScale.read()));
+        // Apply a conservative correction for the ESP32 sleep-clock rate.
+        // Do not calibrate from the first wake if there is no prior interval.
+        if (sleepTime > 0) {
+            spiffsScale = spiffsScale - (1.0 * usecLate / sleepTime) * 0.3;
+            spiffsScale = min(1.1F, max(0.9F, spiffsScale.read()));
+        }
         
         // set for next sleep result
         spiffsCurrentRep = spiffsCurrentRep + 1;
@@ -255,7 +259,6 @@ void loop() {
     } else {
         spiffsScale = 1.004;
     }
-    spiffsScale = 1.0; // TMP disable scaling for data collection
 
     goal = spiffsCurrentGoal; // might have changed
     uint64_t ttg = goal - (b->ts % goal);
