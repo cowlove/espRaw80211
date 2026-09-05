@@ -278,6 +278,31 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         return count;
     }
 
+    void dumpDeviceBeaconMatrix() {
+        const uint64_t homeBssid = spiffsBeacon.read();
+        out("matrix begin claims %d", (int)claimCount());
+        for (const BeaconClaim &claim : claims) {
+            if (claim.originMac == 0) continue;
+            out("matrix claim device %012llx beacon %012llx gen %u rssi %d%s",
+                (unsigned long long)claim.originMac,
+                (unsigned long long)claim.bssid,
+                claim.originGeneration, (int)claim.rssi,
+                claim.bssid == homeBssid ? " selected-home" : "");
+        }
+        for (const RemoteBeaconStats &stats : remoteStats) {
+            if (stats.bssid == 0) continue;
+            out("matrix beacon %012llx reports %u observations %u selected %u clients %u",
+                (unsigned long long)stats.bssid, stats.reports,
+                stats.observations, stats.selectedReports,
+                stats.selectingClientCount);
+            for (uint8_t i = 0; i < stats.selectingClientCount; ++i)
+                out("matrix selected device %012llx beacon %012llx",
+                    (unsigned long long)stats.selectingClientMacs[i],
+                    (unsigned long long)stats.bssid);
+        }
+        out("matrix end");
+    }
+
     size_t supporterCount(uint64_t bssid) const {
         size_t count = 0;
         for (const BeaconClaim &claim : claims)
@@ -762,6 +787,7 @@ public:
             (int)supporterCount(candidateBssid), spiffsProposalAge.read(),
             reportTxCount, reportRxCount, reportRxClaimCount,
             switched ? " SWITCH" : "");
+        dumpDeviceBeaconMatrix();
         out("deep sleep %.1f sec, goal %.1f scale %f", sleepUsec / 1000000.0,
             goal / 1000000.0, spiffsScale.read());
         fflush(stdout);
