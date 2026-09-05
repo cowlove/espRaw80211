@@ -47,14 +47,23 @@ struct __attribute__((packed)) BeaconReportHeader {
     uint8_t version;
     uint64_t senderMac;
     uint64_t selectedBeacon;
-    uint8_t beaconCount;
+    uint32_t wakeGeneration;
+    uint16_t packetSequence;
+    uint8_t claimCount;
 };
 
-struct __attribute__((packed)) BeaconReportEntry {
+struct __attribute__((packed)) BeaconClaimEntry {
+    uint64_t originMac;
     uint64_t bssid;
+    uint32_t originGeneration;
     int8_t rssi;
-    uint16_t observations;
-    uint8_t selectingClients;
+};
+
+struct BeaconClaim {
+    uint64_t originMac = 0;
+    uint64_t bssid = 0;
+    uint32_t originGeneration = 0;
+    int8_t rssi = -127;
 };
 
 struct RemoteBeaconStats {
@@ -87,7 +96,7 @@ class BeaconSimulationEnvironment : public Csim_Module {
         uint64_t nextUsec;
     };
     struct Environment {
-        SimBeacon beacons[3];
+        SimBeacon beacons[2];
     } environments[CONTEXT_COUNT] = {};
     struct Destination {
         CsimWifiBeaconCaptureSource *capture;
@@ -108,16 +117,15 @@ public:
             environments[i].beacons[0] =
                 {bssidBase + 2, (int8_t)(-38 - (i % 5)), 4, 51200,
                  tsfOrigin, tsfRatePpm, 0};
-            environments[i].beacons[1] =
-                {bssidBase + 3, (int8_t)(-60 - (i % 4)), 4, 204800,
-                 tsfOrigin + 6000000, tsfRatePpm, 0};
-            // One weak infrastructure beacon is common to every simulated
-            // RF environment.  Keep it weaker and less frequent than the
-            // per-context beacon so bootstrap selection remains local while
-            // later tests can reason about common competing infrastructure.
-            environments[i].beacons[2] =
-                {0x000096ce0fEEULL, -82, 4, 204800,
-                 5000000, 1000000, 0};
+            // Split the fleet into two physically valid rendezvous groups.
+            // Each client has a louder unique distractor, while all clients
+            // in its half see exactly the same weaker beacon and clock.
+            const bool secondHalf = i >= (CONTEXT_COUNT + 1) / 2;
+            environments[i].beacons[1] = secondHalf
+                ? SimBeacon{0x000096ce0fb2ULL, -68, 4, 102400,
+                            29000000, 999850, 0}
+                : SimBeacon{0x000096ce0fa1ULL, -66, 4, 102400,
+                            7000000, 1000125, 0};
         }
     }
 
@@ -181,9 +189,11 @@ using BeaconRendezvousContextBase = HardwareContext;
 class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr size_t packetLogSize = 64;
     static constexpr size_t remoteStatsSize = 64;
-    // Header + 14 entries, including the four-byte BRPT prefix, stays within
+    static constexpr size_t claimTableSize = 128;
+    // Header + eight attributable claims, including the four-byte BRPT prefix,
+    // stays within
     // ESPNowMux's conservative 200-byte physical packet limit.
-    static constexpr size_t reportMaxBeacons = 14;
+    static constexpr size_t reportMaxClaims = 8;
     static constexpr int reportMinRssi = -85;
     static constexpr uint64_t reportPeriodUsec = 200000;
     static constexpr uint64_t defaultRendezvousUsec = 60ULL * 1000000ULL;
@@ -201,6 +211,10 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint64_t deviceMac = 0;
     int loopCount = 0;
     RemoteBeaconStats remoteStats[remoteStatsSize] = {};
+    BeaconClaim claims[claimTableSize] = {};
+    uint32_t wakeGeneration = 0;
+    uint16_t reportSequence = 0;
+    size_t claimTransmitCursor = 0;
 
     static int score(const BeaconInfo &info) { return info.count; }
 
@@ -212,6 +226,24 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         static_cast<BeaconRendezvousContext *>(arg)->onCollect(packet);
     }
 
+    void mergeClaim(uint64_t originMac, uint64_t bssid,
+                    uint32_t originGeneration, int8_t rssi) {
+        if (originMac == 0 || bssid == 0) return;
+        size_t empty = claimTableSize;
+        for (size_t i = 0; i < claimTableSize; ++i) {
+            BeaconClaim &claim = claims[i];
+            if (claim.originMac == originMac && claim.bssid == bssid) {
+                if (originGeneration < claim.originGeneration) return;
+                claim.originGeneration = originGeneration;
+                claim.rssi = rssi;
+                return;
+            }
+            if (empty == claimTableSize && claim.originMac == 0) empty = i;
+        }
+        if (empty == claimTableSize) return;
+        claims[empty] = {originMac, bssid, originGeneration, rssi};
+    }
+
     void onOneShot(const WifiBeaconPacket &packet) {
         if (packet.length < 32 || beaconBssid(packet.data) != targetBeacon) return;
         BeaconInfo &info = packetLog[0];
@@ -221,6 +253,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         info.rssi = packet.rssi;
         info.count++;
         info.ts = beaconTsf(packet.data);
+        mergeClaim(deviceMac, targetBeacon, wakeGeneration, packet.rssi);
         beaconCapture.setCallback(nullptr);
     }
 
@@ -236,6 +269,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 info.rssi = (packet.rssi + info.count * info.rssi) / (info.count + 1);
                 info.count++;
                 info.ts = beaconTsf(packet.data);
+                mergeClaim(deviceMac, bssid, wakeGeneration, packet.rssi);
                 return;
             }
         }
@@ -252,19 +286,21 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         if (length < (int)sizeof(BeaconReportHeader)) return;
         BeaconReportHeader header;
         memcpy(&header, data, sizeof(header));
-        if (header.version != 2) return;
+        if (header.version != 3) return;
         const size_t available = (length - sizeof(header)) /
-            sizeof(BeaconReportEntry);
-        const size_t count = min((size_t)header.beaconCount,
-                                 min(available, reportMaxBeacons));
+            sizeof(BeaconClaimEntry);
+        const size_t count = min((size_t)header.claimCount,
+                                 min(available, reportMaxClaims));
         uint64_t sender = header.senderMac;
         if (sender == 0 && from != nullptr)
             for (int i = 0; i < 6; ++i) sender = (sender << 8) | from[i];
         if (sender == deviceMac) return;
         for (size_t i = 0; i < count; ++i) {
-            BeaconReportEntry entry;
+            BeaconClaimEntry entry;
             memcpy(&entry, data + sizeof(header) +
                    i * sizeof(entry), sizeof(entry));
+            mergeClaim(entry.originMac, entry.bssid,
+                       entry.originGeneration, entry.rssi);
             size_t slot = 0;
             for (; slot < remoteStatsSize; ++slot) {
                 if (remoteStats[slot].bssid == entry.bssid) break;
@@ -274,11 +310,12 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             RemoteBeaconStats &stats = remoteStats[slot];
             stats.bssid = entry.bssid;
             stats.reports++;
-            stats.observations += entry.observations;
+            stats.observations++;
             stats.lastRssi = entry.rssi;
             stats.strongestRssi = max(stats.strongestRssi, entry.rssi);
             stats.lastSender = sender;
-            if (entry.bssid == header.selectedBeacon) {
+            if (entry.originMac == sender &&
+                entry.bssid == header.selectedBeacon) {
                 stats.selectedReports++;
                 bool knownClient = false;
                 for (uint8_t j = 0; j < stats.selectingClientCount; ++j)
@@ -296,32 +333,30 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 
     void publishReport() {
         uint8_t buffer[sizeof(BeaconReportHeader) +
-                       reportMaxBeacons * sizeof(BeaconReportEntry)] = {};
-        BeaconReportHeader header = {2, deviceMac, spiffsBeacon.read(), 0};
+                       reportMaxClaims * sizeof(BeaconClaimEntry)] = {};
+        BeaconReportHeader header = {3, deviceMac, spiffsBeacon.read(),
+                                     wakeGeneration, reportSequence++, 0};
         memcpy(buffer, &header, sizeof(header));
         size_t count = 0;
-        // packetLog is maintained in observation-count order only loosely; the
-        // cap is intentional and keeps one report within ESP-NOW's physical
-        // packet limit.
-        for (size_t i = 0; i < packetLogSize && count < reportMaxBeacons; ++i) {
-            const BeaconInfo &info = packetLog[i];
-            if (info.ssid == 0 || info.rssi < reportMinRssi) continue;
-            BeaconReportEntry entry = {
-                info.ssid, (int8_t)info.rssi,
-                (uint16_t)min<uint64_t>(info.count, 0xffff), 0};
-            for (size_t j = 0; j < remoteStatsSize; ++j)
-                if (remoteStats[j].bssid == info.ssid) {
-                    entry.selectingClients = remoteStats[j].selectingClientCount;
-                    break;
-                }
+        // Rotate through the longer-lived claim table. Repeated 5 Hz packets
+        // eventually advertise the complete table without exceeding ESP-NOW's
+        // conservative packet limit.
+        size_t visited = 0;
+        while (visited < claimTableSize && count < reportMaxClaims) {
+            const size_t i = claimTransmitCursor++ % claimTableSize;
+            visited++;
+            const BeaconClaim &claim = claims[i];
+            if (claim.originMac == 0 || claim.rssi < reportMinRssi) continue;
+            BeaconClaimEntry entry = {claim.originMac, claim.bssid,
+                                      claim.originGeneration, claim.rssi};
             memcpy(buffer + sizeof(header) + count * sizeof(entry),
                    &entry, sizeof(entry));
             count++;
         }
-        header.beaconCount = (uint8_t)count;
+        header.claimCount = (uint8_t)count;
         memcpy(buffer, &header, sizeof(header));
         privMux.send("BRPT", buffer, sizeof(header) +
-                     count * sizeof(BeaconReportEntry));
+                     count * sizeof(BeaconClaimEntry));
     }
 
     void configureBeaconRadio() {
@@ -404,6 +439,8 @@ public:
 #endif
         memset(packetLog, 0, sizeof(packetLog));
         memset(remoteStats, 0, sizeof(remoteStats));
+        wakeGeneration++;
+        reportSequence = 0;
         loopCount = 0;
         startUsec = micros();
         nextReportUsec = startUsec;
