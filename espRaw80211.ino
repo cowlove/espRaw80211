@@ -237,6 +237,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint16_t reportTxCount = 0;
     uint16_t reportRxCount = 0;
     uint16_t reportRxClaimCount = 0;
+    uint32_t scanParseRejects = 0;
+    uint32_t scanAccepted = 0;
+    uint32_t targetHits = 0;
     size_t claimTransmitCursor = 0;
     bool scoutWake = false;
     bool scoutRendezvousWake = false;
@@ -351,6 +354,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                     (unsigned long long)stats.selectingClientMacs[i],
                     (unsigned long long)stats.bssid);
         }
+        const WifiBeaconCaptureStats capture = beaconCapture.getStats();
+        const uint64_t scanSpan = micros() >= startUsec ? micros() - startUsec : 0;
+        out("matrix capture callback %u mgmt-reject %u short %u nonbeacon %u beacon %u delivered %u parse-reject %u accepted %u target-hits %u scan-span %.3f sec",
+            capture.callbackFrames, capture.nonManagementFrames,
+            capture.shortFrames, capture.nonBeaconFrames, capture.beaconFrames,
+            capture.deliveredFrames, scanParseRejects, scanAccepted, targetHits,
+            scanSpan / 1000000.0);
         out("matrix end");
     }
 
@@ -469,8 +479,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
     void onBroadScan(const WifiBeaconPacket &packet) {
-        if (packet.length < 32) return;
+        if (packet.length < 32) {
+            scanParseRejects++;
+            return;
+        }
         const uint64_t bssid = beaconBssid(packet.data);
+        scanAccepted++;
+        if (bssid == targetBeacon) targetHits++;
         size_t i;
         for (i = 0; i < packetLogSize; ++i) {
             if (packetLog[i].ssid == bssid) {
@@ -649,6 +664,9 @@ public:
         reportTxCount = 0;
         reportRxCount = 0;
         reportRxClaimCount = 0;
+        scanParseRejects = 0;
+        scanAccepted = 0;
+        targetHits = 0;
         beaconReceivedAtUsec = 0;
         loopCount = 0;
         startUsec = micros();
@@ -810,14 +828,17 @@ public:
         const uint64_t homeBssid = spiffsBeacon.read();
         const uint64_t candidateBssid = reportOnlyCandidate(homeBssid);
         const bool switched = advanceProposal(homeBssid, candidateBssid);
-        out("gossip %s claims %d home %012llx supporters %d proposal %012llx supporters %d age %d espnow tx %u rx %u claims %u%s",
+        out("gossip %s claims %d home %012llx supporters %d proposal %012llx supporters %d age %d espnow tx %u ok %u fail %u busy %u rx %u claims %u scan accepted %u target %u parse-reject %u%s",
             scoutRendezvousWake ? "scout-rendezvous" :
             (scoutWake ? "scout-acquire" : "home"),
             (int)claimCount(), (unsigned long long)homeBssid,
             (int)supporterCount(homeBssid),
             (unsigned long long)candidateBssid,
             (int)supporterCount(candidateBssid), spiffsProposalAge.read(),
-            reportTxCount, reportRxCount, reportRxClaimCount,
+            reportTxCount, privMux.getSendSuccesses(),
+            privMux.getSendFailures(), privMux.getSendBusyDrops(),
+            reportRxCount, reportRxClaimCount, scanAccepted, targetHits,
+            scanParseRejects,
             switched ? " SWITCH" : "");
         dumpDeviceBeaconMatrix();
         out("deep sleep %.1f sec, goal %.1f scale %f", sleepUsec / 1000000.0,
