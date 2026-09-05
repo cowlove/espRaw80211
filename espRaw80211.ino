@@ -40,6 +40,32 @@ struct BeaconInfo {
     uint64_t seen2 = 0;
 };
 
+// Application-level rendezvous advertisement.  Keep this deliberately small:
+// ESPNowMux reserves four bytes for the routing prefix and uses a conservative
+// 200-byte physical packet size.
+struct __attribute__((packed)) BeaconReportHeader {
+    uint8_t version;
+    uint64_t senderMac;
+    uint64_t selectedBeacon;
+    uint8_t beaconCount;
+};
+
+struct __attribute__((packed)) BeaconReportEntry {
+    uint64_t bssid;
+    int8_t rssi;
+    uint16_t observations;
+};
+
+struct RemoteBeaconStats {
+    uint64_t bssid = 0;
+    uint32_t reports = 0;
+    uint32_t observations = 0;
+    uint32_t selectedReports = 0;
+    int8_t strongestRssi = -127;
+    int8_t lastRssi = -127;
+    uint64_t lastSender = 0;
+};
+
 #ifdef CSIM
 #ifndef CONTEXT_COUNT
 #define CONTEXT_COUNT 4
@@ -151,6 +177,10 @@ using BeaconRendezvousContextBase = HardwareContext;
 
 class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr size_t packetLogSize = 64;
+    static constexpr size_t remoteStatsSize = 64;
+    static constexpr size_t reportMaxBeacons = 15;
+    static constexpr int reportMinRssi = -85;
+    static constexpr uint64_t reportPeriodUsec = 200000;
     static constexpr uint64_t defaultRendezvousUsec = 60ULL * 1000000ULL;
 
     BeaconInfo packetLog[packetLogSize] = {};
@@ -162,7 +192,10 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint64_t targetBeacon = 0;
     int wifiChannel = 4;
     uint64_t startUsec = 0;
+    uint64_t nextReportUsec = 0;
+    uint64_t deviceMac = 0;
     int loopCount = 0;
+    RemoteBeaconStats remoteStats[remoteStatsSize] = {};
 
     static int score(const BeaconInfo &info) { return info.count; }
 
@@ -210,6 +243,65 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         onCollect(packet);
     }
 
+    void onReport(const uint8_t *from, const uint8_t *data, int length) {
+        if (length < (int)sizeof(BeaconReportHeader)) return;
+        BeaconReportHeader header;
+        memcpy(&header, data, sizeof(header));
+        if (header.version != 1) return;
+        const size_t available = (length - sizeof(header)) /
+            sizeof(BeaconReportEntry);
+        const size_t count = min((size_t)header.beaconCount,
+                                 min(available, reportMaxBeacons));
+        uint64_t sender = header.senderMac;
+        if (sender == 0 && from != nullptr)
+            for (int i = 0; i < 6; ++i) sender = (sender << 8) | from[i];
+        if (sender == deviceMac) return;
+        for (size_t i = 0; i < count; ++i) {
+            BeaconReportEntry entry;
+            memcpy(&entry, data + sizeof(header) +
+                   i * sizeof(entry), sizeof(entry));
+            size_t slot = 0;
+            for (; slot < remoteStatsSize; ++slot) {
+                if (remoteStats[slot].bssid == entry.bssid) break;
+                if (remoteStats[slot].bssid == 0) break;
+            }
+            if (slot == remoteStatsSize) continue;
+            RemoteBeaconStats &stats = remoteStats[slot];
+            stats.bssid = entry.bssid;
+            stats.reports++;
+            stats.observations += entry.observations;
+            stats.lastRssi = entry.rssi;
+            stats.strongestRssi = max(stats.strongestRssi, entry.rssi);
+            stats.lastSender = sender;
+            if (entry.bssid == header.selectedBeacon) stats.selectedReports++;
+        }
+    }
+
+    void publishReport() {
+        uint8_t buffer[sizeof(BeaconReportHeader) +
+                       reportMaxBeacons * sizeof(BeaconReportEntry)] = {};
+        BeaconReportHeader header = {1, deviceMac, spiffsBeacon.read(), 0};
+        memcpy(buffer, &header, sizeof(header));
+        size_t count = 0;
+        // packetLog is maintained in observation-count order only loosely; the
+        // cap is intentional and keeps one report within ESP-NOW's physical
+        // packet limit.
+        for (size_t i = 0; i < packetLogSize && count < reportMaxBeacons; ++i) {
+            const BeaconInfo &info = packetLog[i];
+            if (info.ssid == 0 || info.rssi < reportMinRssi) continue;
+            BeaconReportEntry entry = {
+                info.ssid, (int8_t)info.rssi,
+                (uint16_t)min<uint64_t>(info.count, 0xffff)};
+            memcpy(buffer + sizeof(header) + count * sizeof(entry),
+                   &entry, sizeof(entry));
+            count++;
+        }
+        header.beaconCount = (uint8_t)count;
+        memcpy(buffer, &header, sizeof(header));
+        privMux.send("BRPT", buffer, sizeof(header) +
+                     count * sizeof(BeaconReportEntry));
+    }
+
     void configureBeaconRadio() {
 #ifndef CSIM
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -225,7 +317,6 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 
     void startOneShotCapture() {
         targetBeacon = spiffsBeacon;
-        configureBeaconRadio();
         beaconCapture.setCallback(oneShotCallback, this);
         beaconCapture.start();
     }
@@ -290,8 +381,16 @@ public:
         CSIM_ASSERT(currentContext == context);
 #endif
         memset(packetLog, 0, sizeof(packetLog));
+        memset(remoteStats, 0, sizeof(remoteStats));
         loopCount = 0;
         startUsec = micros();
+        nextReportUsec = startUsec;
+        deviceMac =
+#ifdef CSIM
+            context->mac;
+#else
+            ESP.getEfuseMac();
+#endif
         SPIFFSVariableESP32Base::begin();
 #ifdef CSIM
         const double setupSeconds =
@@ -312,6 +411,14 @@ public:
         esp_task_wdt_add(NULL);
 #endif
 #endif
+        // Configure before ESPNowMux initializes, matching the existing
+        // hardware radio ordering used by beacon capture.
+        configureBeaconRadio();
+        privMux.registerReadCallback("BRPT", [this](const uint8_t *from,
+                                                     const uint8_t *data,
+                                                     int length) {
+            onReport(from, data, length);
+        });
         startOneShotCapture();
     }
 
@@ -325,6 +432,11 @@ public:
 #endif
         loopCount++;
         esp_task_wdt_reset();
+        const uint64_t nowUsec = micros();
+        if (nowUsec >= nextReportUsec) {
+            publishReport();
+            nextReportUsec = nowUsec + reportPeriodUsec;
+        }
         if (packetLog[0].count == 0 && micros() - startUsec < 10000000) {
             delay(1);
             return;
@@ -335,7 +447,6 @@ public:
         if (result.count == 0) {
             out("No beacon packet received, picking new beacon");
             beaconCapture.stop();
-            configureBeaconRadio();
             startCollection();
             delay(250);
             beaconCapture.stop();
