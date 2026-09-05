@@ -393,7 +393,6 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint64_t reportOnlyCandidate(uint64_t homeBssid) const {
         uint64_t best = homeBssid;
         size_t bestSupport = supporterCount(homeBssid);
-        int bestRssi = -127;
         for (const BeaconInfo &visible : packetLog) {
             if (visible.ssid == 0 || visible.rssi < reportMinRssi ||
                 visible.count < minimumCandidatePackets)
@@ -402,17 +401,15 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             if (!supportersInclude(visible.ssid, homeBssid) ||
                 support < bestSupport)
                 continue;
-            const BeaconInfo *bestInfo = nullptr;
-            for (const BeaconInfo &candidate : packetLog)
-                if (candidate.ssid == best) bestInfo = &candidate;
+            // Rendezvous potential is the primary objective. Local packet
+            // quality is only an eligibility gate; it must never defeat a
+            // candidate with more peer support. When support is equal, use a
+            // deterministic BSSID ordering so devices do not split because
+            // their local packet counts differ.
             if (best == homeBssid || support > bestSupport ||
-                (support == bestSupport && bestInfo != nullptr &&
-                 betterQuality(visible, *bestInfo)) ||
-                (support == bestSupport && bestInfo != nullptr &&
-                 !betterQuality(*bestInfo, visible) && visible.ssid < best)) {
+                (support == bestSupport && visible.ssid < best)) {
                 best = visible.ssid;
                 bestSupport = support;
-                bestRssi = visible.rssi;
             }
         }
         return best;
