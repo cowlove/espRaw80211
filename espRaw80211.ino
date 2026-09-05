@@ -1,13 +1,18 @@
 #include "jimlib.h"
+#include "espNowMux.h"
 #include "raw80211Capture.h"
 #ifndef ESP32
 #error Only the ESP32 is supported
-#endif 
+#endif
 #ifndef CSIM
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <esp_task_wdt.h>
 #include <rom/uart.h>
+#define CSIM_ASSERT(condition) do { } while (0)
+#else
+#include <assert.h>
+#define CSIM_ASSERT(condition) assert(condition)
 #endif
 
 static uint64_t beaconBssid(const uint8_t *frame) {
@@ -22,436 +27,368 @@ static uint64_t beaconTsf(const uint8_t *frame) {
     return value;
 }
 
-#ifdef CSIM
-// This legacy single-context sketch uses the process-wide CSIM radio rather
-// than a private multi-device context.  The shared HardwareContext below is
-// intentionally hardware-only; CSIM applications should derive from
-// Csim_privateContext when they need isolated simulated devices.
-class HardwareContext {
-public:
-    CsimWifiBeaconCaptureSource beaconCapture{&defaultContext};
+struct BeaconInfo {
+    uint64_t ssid = 0;
+    int rssi = 0;
+    uint64_t ts = 0;
+    int count = 0;
+    uint64_t seen = 0;
+    uint64_t seen2 = 0;
 };
-#endif
-
-static HardwareContext hardware;
 
 #ifdef CSIM
-// Application-owned synthetic RF environment.  The capture HAL only accepts
-// injected beacon packets; cadence and beacon identities remain in the sketch.
-static void serviceSyntheticBeacons() {
+// Application-owned RF world. Each destination selects one environment, so
+// simulated devices can observe different BSSIDs and beacon clocks while the
+// capture HAL remains unaware of the RF model.
+class BeaconSimulationEnvironment : public Csim_Module {
     struct SimBeacon {
         uint64_t bssid;
         int8_t rssi;
+        uint8_t channel;
         uint32_t intervalUsec;
-        uint64_t nextUsec;
         uint64_t tsfOrigin;
+        uint32_t tsfRatePpm;
+        uint64_t nextUsec;
     };
-    static SimBeacon beacons[] = {
-        {0x000096ce8362ULL, -43, 102400, 0, 1000000},
-        {0x000096ce8363ULL, -58, 102400, 0, 2000000},
-        {0x000096ce8364ULL, -67, 204800, 0, 3000000},
+    struct Environment {
+        SimBeacon beacons[3];
+    } environments[4] = {
+        {{{0x000096ce8362ULL, -38, 4,  51200, 1000000, 1000000, 0},
+          {0x000096ce8363ULL, -61, 4, 204800, 2000000, 1000000, 0},
+          {0x000096ce8364ULL, -72, 4, 204800, 3000000, 1000000, 0}}},
+        {{{0x000096ce8372ULL, -40, 4,  51200, 17000000, 1000150, 0},
+          {0x000096ce8373ULL, -59, 4, 204800, 23000000, 1000150, 0},
+          {0x000096ce8374ULL, -70, 4, 204800, 29000000, 1000150, 0}}},
+        {{{0x000096ce8382ULL, -42, 4,  51200, 33000000, 999850, 0},
+          {0x000096ce8383ULL, -57, 4, 204800, 39000000, 999850, 0},
+          {0x000096ce8384ULL, -69, 4, 204800, 45000000, 999850, 0}}},
+        {{{0x000096ce8392ULL, -39, 4,  51200, 61000000, 1000300, 0},
+          {0x000096ce8393ULL, -56, 4, 204800, 67000000, 1000300, 0},
+          {0x000096ce8394ULL, -68, 4, 204800, 73000000, 1000300, 0}}},
     };
-    const uint64_t now = micros();
-    for (SimBeacon &beacon : beacons) {
-        if (beacon.nextUsec == 0) beacon.nextUsec = now;
-        while (now >= beacon.nextUsec) {
-            uint8_t frame[36] = {};
-            frame[0] = 0x80; // management beacon
-            for (int i = 0; i < 6; ++i)
-                frame[10 + i] = beacon.bssid >> (40 - 8 * i);
-            const uint64_t tsf = beacon.tsfOrigin + beacon.nextUsec;
-            memcpy(frame + 24, &tsf, sizeof(tsf));
-            WifiBeaconPacket packet;
-            packet.driverTimestampUsec = beacon.nextUsec;
-            packet.localTimestampUsec = beacon.nextUsec;
-            packet.rssi = beacon.rssi;
-            packet.channel = 4;
-            packet.data = frame;
-            packet.length = sizeof(frame);
-            hardware.beaconCapture.inject(packet);
-            beacon.nextUsec += beacon.intervalUsec;
+    struct Destination {
+        CsimWifiBeaconCaptureSource *capture;
+        uint8_t channel;
+        uint8_t environmentId;
+    } destinations[8] = {};
+    size_t destinationCount = 0;
+
+    uint64_t absoluteUsec() const { return sim().bootTimeUsec + micros(); }
+
+    void emit(const SimBeacon &beacon, uint64_t emissionUsec,
+              const Destination &destination) {
+        if (destination.environmentId >= 4 || destination.channel != beacon.channel)
+            return;
+        uint8_t frame[36] = {};
+        frame[0] = 0x80;
+        for (int i = 0; i < 6; ++i)
+            frame[10 + i] = beacon.bssid >> (40 - 8 * i);
+        const uint64_t tsf = beacon.tsfOrigin +
+            emissionUsec * beacon.tsfRatePpm / 1000000ULL;
+        memcpy(frame + 24, &tsf, sizeof(tsf));
+        WifiBeaconPacket packet;
+        packet.driverTimestampUsec = emissionUsec & 0xffffffffULL;
+        packet.localTimestampUsec = emissionUsec;
+        packet.rssi = beacon.rssi;
+        packet.channel = beacon.channel;
+        packet.data = frame;
+        packet.length = sizeof(frame);
+        destination.capture->inject(packet);
+    }
+
+public:
+    void addDestination(CsimWifiBeaconCaptureSource *capture, uint8_t channel,
+                        uint8_t environmentId) {
+        CSIM_ASSERT(destinationCount < sizeof(destinations) / sizeof(destinations[0]));
+        destinations[destinationCount++] = {capture, channel, environmentId};
+    }
+
+    void loop() override {
+        const uint64_t now = absoluteUsec();
+        for (uint8_t environmentId = 0; environmentId < 4; ++environmentId) {
+            for (SimBeacon &beacon : environments[environmentId].beacons) {
+                if (beacon.nextUsec == 0) beacon.nextUsec = now;
+                while (now >= beacon.nextUsec) {
+                    for (size_t i = 0; i < destinationCount; ++i)
+                        if (destinations[i].environmentId == environmentId)
+                            emit(beacon, beacon.nextUsec, destinations[i]);
+                    beacon.nextUsec += beacon.intervalUsec;
+                }
+            }
         }
     }
-}
-#else
-static void serviceSyntheticBeacons() {}
-#endif
-
-struct Info { 
-    uint64_t ssid = 0;
-    int rssi;
-    uint64_t ts;
-    int count = 0;
-    uint64_t seen;
-    uint64_t seen2;
 };
 
-Info pktLog[64];
-
-
-SPIFFSVariable<uint64_t> spiffsBeacon("/beaconX", 0);//0x000096ce8362);
-SPIFFSVariable<uint64_t> spiffsSleepTime("/sleepTimeX", 0);
-SPIFFSVariable<float> spiffsScale("/scaleX", 1.0);
-SPIFFSVariable<uint64_t> spiffsCurrentGoal("/currentGoal", 0);
-SPIFFSVariable<int> spiffsCurrentRep("/currentRep", 0);
-uint64_t intr_beacon; 
-int wifi_channel = 4;
-static constexpr uint64_t DEFAULT_RENDEZVOUS_US = 60ULL * 1000000ULL;
-
-
-void intr_oneShot(const WifiBeaconPacket &packet, void *) {
-    if (packet.length < 32 || (packet.data[0] & 0xfc) != 0x80) return;
-    const uint64_t bssid = beaconBssid(packet.data);
-
-    if (bssid == intr_beacon) {
-        int i = 0;
-        pktLog[i].ssid = bssid;
-        pktLog[i].seen2 = packet.localTimestampUsec;
-        pktLog[i].seen = packet.driverTimestampUsec;
-        pktLog[i].rssi = packet.rssi;
-        pktLog[i].count++;
-        pktLog[i].ts = beaconTsf(packet.data);
-        hardware.beaconCapture.setCallback(nullptr);
-    }
-}
-
-//int score(const Info &i) { return (110 - i.rssi) * i.count; }
-int score(const Info &i) { return i.count; }
-void intr_collect(const WifiBeaconPacket &packet, void *) {
-    if (packet.length < 32 || (packet.data[0] & 0xfc) != 0x80) return;
-    const uint64_t bssid = beaconBssid(packet.data);
-    {
-        //printf("%07.3f MAC: %06llx ts: %016llx RSSI: % 4d\n", 
-        //    millis() / 1000.0, pk->send_addr, pk->timestamp, pt->rx_ctrl.rssi);
-        int i;
-        for(i = 0; i < sizeof(pktLog)/sizeof(pktLog[0]); i++) {
-            if(pktLog[i].ssid == bssid) {
-                pktLog[i].seen2 = packet.localTimestampUsec;
-                pktLog[i].seen = packet.driverTimestampUsec;
-                pktLog[i].rssi = (packet.rssi + pktLog[i].count * pktLog[i].rssi) / (pktLog[i].count + 1);
-                pktLog[i].count++;
-                pktLog[i].ts = beaconTsf(packet.data);
-                break;
-            } 
-        }
-        if (i == sizeof(pktLog)/sizeof(pktLog[0])) {
-            int worst = 0;
-            for(i = 0; i < sizeof(pktLog)/sizeof(pktLog[0]); i++) {
-                if (pktLog[i].ssid == 0) { 
-                    worst = i;
-                    break;
-                }
-                if (score(pktLog[i]) <= score(pktLog[worst]))
-                    worst = i;
-            }
-            pktLog[worst].ssid = bssid;
-            intr_collect(packet, nullptr);
-            return;
-        }
-        int best = 0;
-        for(i = 0; i < sizeof(pktLog)/sizeof(pktLog[0]); i++) {
-            if (pktLog[i].ssid != 0 && score(pktLog[i]) >= score(pktLog[best]))
-                best = i;
-        }
-        //printf("best: %02d %012llx %3d %6d %016llx %016llx\n", 
-        //    best, pktLog[best].ssid, pktLog[best].rssi, pktLog[best].count);
-    }
-}  
-
-void pretty_packet_handler(const WifiBeaconPacket &packet, void *);
-
-static void configureBeaconRadio() {
-#ifndef CSIM
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_stop();
-    esp_wifi_deinit();
-    esp_wifi_init(&cfg);
-    esp_wifi_start();
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_disconnect();
-    esp_wifi_set_channel(wifi_channel, WIFI_SECOND_CHAN_NONE);
+static BeaconSimulationEnvironment beaconEnvironment;
+using BeaconRendezvousContextBase = Csim_privateContext;
+#else
+using BeaconRendezvousContextBase = HardwareContext;
 #endif
-}
 
-void setupPromisc() {
-    intr_beacon = spiffsBeacon;
-    configureBeaconRadio();
-    hardware.beaconCapture.setCallback(intr_oneShot);
-    hardware.beaconCapture.start();
-}
+class BeaconRendezvousContext : public BeaconRendezvousContextBase {
+    static constexpr size_t packetLogSize = 64;
+    static constexpr uint64_t defaultRendezvousUsec = 60ULL * 1000000ULL;
 
-//JStuff j;
+    BeaconInfo packetLog[packetLogSize] = {};
+    SPIFFSVariable<uint64_t> spiffsBeacon{"/beaconX", 0};
+    SPIFFSVariable<uint64_t> spiffsSleepTime{"/sleepTimeX", 0};
+    SPIFFSVariable<float> spiffsScale{"/scaleX", 1.0};
+    SPIFFSVariable<uint64_t> spiffsCurrentGoal{"/currentGoal", 0};
+    SPIFFSVariable<int> spiffsCurrentRep{"/currentRep", 0};
+    uint64_t targetBeacon = 0;
+    int wifiChannel = 4;
+    uint64_t startUsec = 0;
+    int loopCount = 0;
 
-void setupPromisc2() { 
-    intr_beacon = spiffsBeacon;
-    hardware.beaconCapture.setCallback(intr_collect);
-    hardware.beaconCapture.start();
-}
+    static int score(const BeaconInfo &info) { return info.count; }
 
+    static void oneShotCallback(const WifiBeaconPacket &packet, void *arg) {
+        static_cast<BeaconRendezvousContext *>(arg)->onOneShot(packet);
+    }
 
-void println(const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    printf("%09.3f ", millis()/1000.0);
-    vprintf(fmt, args);
-    printf("\n");
-}
-#define OUT println
-//JStuff j;
-void setup() {
-    //j.begin();
-    //Serial.begin(921600);
-    // SPIFFSVariable is backed by LittleFS in jimlib.  Mount it before any
-    // persisted variable is read or written.
-    SPIFFSVariableESP32Base::begin();
-    printf("%09.3f setup() waiting for %llx\n", millis()/1000.0, spiffsBeacon.read());
+    static void collectCallback(const WifiBeaconPacket &packet, void *arg) {
+        static_cast<BeaconRendezvousContext *>(arg)->onCollect(packet);
+    }
+
+    void onOneShot(const WifiBeaconPacket &packet) {
+        if (packet.length < 32 || beaconBssid(packet.data) != targetBeacon) return;
+        BeaconInfo &info = packetLog[0];
+        info.ssid = targetBeacon;
+        info.seen2 = packet.localTimestampUsec;
+        info.seen = packet.driverTimestampUsec;
+        info.rssi = packet.rssi;
+        info.count++;
+        info.ts = beaconTsf(packet.data);
+        beaconCapture.setCallback(nullptr);
+    }
+
+    void onCollect(const WifiBeaconPacket &packet) {
+        if (packet.length < 32) return;
+        const uint64_t bssid = beaconBssid(packet.data);
+        size_t i;
+        for (i = 0; i < packetLogSize; ++i) {
+            if (packetLog[i].ssid == bssid) {
+                BeaconInfo &info = packetLog[i];
+                info.seen2 = packet.localTimestampUsec;
+                info.seen = packet.driverTimestampUsec;
+                info.rssi = (packet.rssi + info.count * info.rssi) / (info.count + 1);
+                info.count++;
+                info.ts = beaconTsf(packet.data);
+                return;
+            }
+        }
+        size_t worst = 0;
+        for (i = 0; i < packetLogSize; ++i) {
+            if (packetLog[i].ssid == 0) { worst = i; break; }
+            if (score(packetLog[i]) <= score(packetLog[worst])) worst = i;
+        }
+        packetLog[worst].ssid = bssid;
+        onCollect(packet);
+    }
+
+    void configureBeaconRadio() {
+#ifndef CSIM
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        esp_wifi_stop();
+        esp_wifi_deinit();
+        esp_wifi_init(&cfg);
+        esp_wifi_start();
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_wifi_disconnect();
+        esp_wifi_set_channel(wifiChannel, WIFI_SECOND_CHAN_NONE);
+#endif
+    }
+
+    void startOneShotCapture() {
+        targetBeacon = spiffsBeacon;
+        configureBeaconRadio();
+        beaconCapture.setCallback(oneShotCallback, this);
+        beaconCapture.start();
+    }
+
+    void startCollection() {
+        targetBeacon = spiffsBeacon;
+        beaconCapture.setCallback(collectCallback, this);
+        beaconCapture.start();
+    }
+
+    int resetReason() const {
+#ifdef CSIM
+        return rtc_get_reset_reason(0);
+#else
+        return esp_rom_get_reset_reason(0);
+#endif
+    }
+
+    int bestBeaconIndex() const {
+        int best = 0;
+        for (size_t i = 0; i < packetLogSize; ++i)
+            if (packetLog[i].ssid != 0 && score(packetLog[i]) >= score(packetLog[best]))
+                best = (int)i;
+        return best;
+    }
+
+    void out(const char *fmt, ...) const {
+        va_list args;
+        va_start(args, fmt);
+#ifdef CSIM
+        printf("%012llx ", (unsigned long long)context->mac);
+#endif
+        printf("%09.3f ", millis() / 1000.0);
+        vprintf(fmt, args);
+        printf("\n");
+        va_end(args);
+    }
+
+public:
+    explicit BeaconRendezvousContext(uint64_t address = 0) :
+        BeaconRendezvousContextBase(address) {
+#ifdef CSIM
+        // Keep the mapping deterministic and explicit: changing the number of
+        // contexts or their MACs does not alter the RF environment definitions.
+        const uint8_t environmentId = (uint8_t)((address - 1) & 3);
+        beaconEnvironment.addDestination(&beaconCapture, wifiChannel,
+                                         environmentId);
+        currentContext = &defaultContext;
+#endif
+    }
+
+#ifdef CSIM
+    void setup() override {
+#else
+    void setup() {
+#endif
+#ifdef CSIM
+        CSIM_ASSERT(currentContext == context);
+#endif
+        memset(packetLog, 0, sizeof(packetLog));
+        loopCount = 0;
+        startUsec = micros();
+        SPIFFSVariableESP32Base::begin();
+        printf("%09.3f setup() waiting for %llx\n", millis() / 1000.0,
+               (unsigned long long)spiffsBeacon.read());
+#ifndef CSIM
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
         esp_task_wdt_config_t c;
-        c.timeout_ms = (25)*1000;
+        c.timeout_ms = 25 * 1000;
         c.idle_core_mask = 0x1;
         c.trigger_panic = true;
         esp_task_wdt_deinit();
-        esp_task_wdt_init(&c);  // include jimlib.h last or this will cause compile errors in other headers
+        esp_task_wdt_init(&c);
         esp_task_wdt_add(NULL);
 #endif
-    setupPromisc();
-}
+#endif
+        startOneShotCapture();
+    }
 
-
-static uint64_t startUs = 0;
-static int loopCount = 0;
-
-static int resetReason() {
 #ifdef CSIM
-    return rtc_get_reset_reason(0);
+    void loop() override {
 #else
-    return esp_rom_get_reset_reason(0);
+    void loop() {
+#endif
+#ifdef CSIM
+        CSIM_ASSERT(currentContext == context);
+#endif
+        loopCount++;
+        esp_task_wdt_reset();
+        if (packetLog[0].count == 0 && millis() - startUsec / 1000 < 10000) {
+            delay(1);
+            return;
+        }
+
+        BeaconInfo result = packetLog[0];
+        BeaconInfo *beacon = &result;
+        if (result.count == 0) {
+            out("No beacon packet received, picking new beacon");
+            beaconCapture.stop();
+            configureBeaconRadio();
+            startCollection();
+            delay(250);
+            beaconCapture.stop();
+            const int best = bestBeaconIndex();
+            out("best beacon: %02d %012llx %3d %6d %016llx %016llx", best,
+                (unsigned long long)packetLog[best].ssid, packetLog[best].rssi,
+                packetLog[best].count, (unsigned long long)packetLog[best].seen,
+                (unsigned long long)packetLog[best].seen2);
+            beacon = &packetLog[best];
+            spiffsBeacon = beacon->ssid;
+        }
+
+        if (resetReason() != 5) {
+            spiffsCurrentGoal = defaultRendezvousUsec;
+            spiffsCurrentRep = 0;
+        }
+        uint64_t goal = spiffsCurrentGoal;
+        if (goal == 0) {
+            goal = defaultRendezvousUsec;
+            spiffsCurrentGoal = goal;
+            spiffsCurrentRep = 0;
+        }
+        beacon->seen2 -= startUsec;
+        const uint64_t packetRxTime = beacon->seen2;
+        int beaconDistance = (int)(beacon->ts % goal);
+        if (beaconDistance > (int)(goal / 2)) beaconDistance -= goal;
+        int espDistance = (int)(packetRxTime % goal);
+        if (espDistance > (int)(goal / 2)) espDistance -= goal;
+        const int usecLate = beaconDistance - espDistance;
+        const uint64_t previousSleep = spiffsSleepTime.read();
+        const float percentLate = previousSleep ? abs(100.0 * usecLate / previousSleep) : 0.0;
+
+        if (resetReason() == 5 || loopCount > 1) {
+            out("slept %lld (%.1fs) rssi %d goal %.2fs rep %d beacon offset %d esp offset %d difference %d late (%.3f%%) scale %f",
+                (long long)previousSleep, previousSleep / 1000000.0, beacon->rssi,
+                goal / 1000000.0, spiffsCurrentRep.read(), beaconDistance,
+                espDistance, usecLate, percentLate, spiffsScale.read());
+            if (previousSleep > 0) {
+                spiffsScale = spiffsScale - (1.0 * usecLate / previousSleep) * 0.3;
+                spiffsScale = min(1.1F, max(0.9F, spiffsScale.read()));
+            }
+            spiffsCurrentRep = spiffsCurrentRep + 1;
+            if (spiffsCurrentRep > 50 && beacon->ts % goal == beacon->ts % (goal * 2)) {
+                spiffsCurrentGoal = spiffsCurrentGoal * 5;
+                spiffsCurrentRep = 0;
+            }
+        } else {
+            spiffsScale = 1.004;
+        }
+
+        goal = spiffsCurrentGoal;
+        uint64_t timeToGoal = goal - (beacon->ts % goal);
+        if (timeToGoal % goal < goal / 2) timeToGoal += goal;
+        uint64_t sleepUsec =
+            (timeToGoal - (micros() - startUsec - packetRxTime)) * spiffsScale;
+        out("deep sleep %.1f sec, goal %.1f scale %f", sleepUsec / 1000000.0,
+            goal / 1000000.0, spiffsScale.read());
+        fflush(stdout);
+#ifndef CSIM
+        uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
+#endif
+        sleepUsec =
+            (timeToGoal - (micros() - startUsec - packetRxTime)) * spiffsScale;
+        spiffsSleepTime = sleepUsec;
+        beaconCapture.stop();
+        esp_sleep_enable_timer_wakeup(sleepUsec);
+        esp_deep_sleep_start();
+    }
+};
+
+BeaconRendezvousContext rendezvous0(0xddeeff000001ULL);
+#ifdef CSIM
+BeaconRendezvousContext rendezvous1(0xddeeff000002ULL);
+BeaconRendezvousContext rendezvous2(0xddeeff000003ULL);
+BeaconRendezvousContext rendezvous3(0xddeeff000004ULL);
+#endif
+
+void setup() {
+#ifndef CSIM
+    rendezvous0.setup();
 #endif
 }
 
 void loop() {
-    loopCount++;
 #ifndef CSIM
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    rendezvous0.loop();
+#else
+    delay(1);
 #endif
-    esp_task_wdt_reset();
-    serviceSyntheticBeacons();
-    if (pktLog[0].count == 0 && millis() - startUs / 1000 < 10000) {
-        delay(1);
-        return;
-    }
-    Info resultPkt = pktLog[0];
-    Info *b = &resultPkt;
-
-    if (resultPkt.count == 0) {
-        // Bootstrap-only discovery for standalone timing experiments. A real
-        // rendezvous deployment would use a pre-assigned BSSID/channel and
-        // must not switch to an unrelated AP after a missed beacon: peers
-        // could then follow different TSF clocks. Without its assigned beacon
-        // a coordinated device must retain calibration and retry later; this
-        // prototype selects a visible beacon so data collection can continue.
-        OUT("No beacon packet received, picking new beacon", millis()); 
-        hardware.beaconCapture.stop();
-        configureBeaconRadio();
-        hardware.beaconCapture.setCallback(intr_collect);
-        hardware.beaconCapture.start();
-        delay(250);
-        serviceSyntheticBeacons();
-        hardware.beaconCapture.stop();
-
-        int best = 0, i;
-        for(i = 0; i < sizeof(pktLog)/sizeof(pktLog[0]); i++) {
-            if (pktLog[i].ssid != 0 && score(pktLog[i]) >= score(pktLog[best]))
-                best = i;
-        }
-        OUT("best beacon: %02d %012llx %3d %6d %016llx %016llx", 
-            best, pktLog[best].ssid, pktLog[best].rssi, pktLog[best].count);
-        
-#ifndef CSIM
-        esp_wifi_stop();
-        esp_wifi_deinit();
-        esp_wifi_init(&cfg);
-#endif
-        b = &pktLog[best];
-        spiffsBeacon = b->ssid;
-    }
-
-    if (resetReason() != 5) {
-        spiffsCurrentGoal = DEFAULT_RENDEZVOUS_US;
-        spiffsCurrentRep = 0;
-    }
-    uint64_t goal = spiffsCurrentGoal;
-    // A freshly erased SPIFFS (or an older image) can leave this persisted
-    // value at zero.  Do not use it as a modulo divisor.
-    if (goal == 0) {
-        goal = DEFAULT_RENDEZVOUS_US;
-        spiffsCurrentGoal = goal;
-        spiffsCurrentRep = 0;
-    }
-    b->seen -= 0; //startUs; // b->seen seems to be counting from esp_wifi_init calls, not from boot 
-    b->seen2 -= startUs;
-    uint64_t pktRxTime = b->seen2;
-
-    int beaconDist = (int)(b->ts % goal);
-    if (beaconDist > goal / 2) { 
-        beaconDist -= goal;
-    }
-    int espDist = (int)(pktRxTime % goal);
-    if (espDist > goal / 2) { 
-        espDist -= goal;
-    }
-
-    int usecLate = beaconDist - espDist;
-    uint64_t sleepTime = spiffsSleepTime.read();
-    float percentLate = sleepTime ? abs(100.0 * usecLate / sleepTime) : 0.0;
-
-    if (resetReason() == 5 || loopCount > 1) {
-        OUT("slept %lld (%.1fs) rssi %d goal %.2fs rep %d beacon offset %d esp offset %d difference %d late (%.3f%%) scale %f", 
-            spiffsSleepTime.read(), spiffsSleepTime.read()/1000000.0, b->rssi, 
-            goal / 1000000.0, spiffsCurrentRep.read(), beaconDist, espDist, 
-            usecLate, percentLate, spiffsScale.read());
-        
-        // Apply a conservative correction for the ESP32 sleep-clock rate.
-        // Do not calibrate from the first wake if there is no prior interval.
-        if (sleepTime > 0) {
-            spiffsScale = spiffsScale - (1.0 * usecLate / sleepTime) * 0.3;
-            spiffsScale = min(1.1F, max(0.9F, spiffsScale.read()));
-        }
-        
-        // set for next sleep result
-        spiffsCurrentRep = spiffsCurrentRep + 1;
-        if (spiffsCurrentRep > 50 && b->ts % goal == b->ts % (goal * 2)) {
-            spiffsCurrentGoal = spiffsCurrentGoal * 5;
-            spiffsCurrentRep = 0;
-        }        
-    } else {
-        spiffsScale = 1.004;
-    }
-
-    goal = spiffsCurrentGoal; // might have changed
-    uint64_t ttg = goal - (b->ts % goal);
-    if (ttg % goal < goal / 2)
-        ttg += goal;
-    uint64_t us = (ttg - (micros() - startUs - pktRxTime)) * spiffsScale;
-    OUT("deep sleep %.1f sec, goal %.1f scale %f", us / 1000000.0, goal / 1000000.0, spiffsScale.read());
-    fflush(stdout);
-    uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
-    
-    // freshen up sleep calculation
-    us = (ttg - (micros() - startUs - pktRxTime)) * spiffsScale;
-    spiffsSleepTime = us;
-    esp_sleep_enable_timer_wakeup(us);
-    esp_deep_sleep_start();        
-
-    pktLog[0].count = 0;
-    startUs = micros();
-    setupPromisc();
 }
-
-int checks = 0;
-#ifndef CSIM
-void check(int ms) { 
-    uint32_t startMs = millis();
-    checks++;
-    int s;
-    while((s = WiFi.status()) != WL_CONNECTED && millis() - startMs < ms) {
-        printf("WiFi.status() %d\n", s);
-        delay(100);
-        wdtReset();
-    }
-    if (WiFi.status() == WL_CONNECTED) { 
-        OUT("connected check=%d", checks);
-        delay(2000);
-        ESP.restart();
-
-    }
-    OUT("not connected after %d", checks);
-}
-#endif
-
-#define CK(x) err = (x); if (err != ESP_OK) printf("Error %d line %d\n", err, __LINE__)
-#ifndef CSIM
-void loop2() { // side investigation, try different wifi init methods to reliably connect 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_err_t err;
-    //j.mqtt.active = false;
-    OUT("connecting...\n");
-
-    WiFi.begin("Station 54", "Local1747");
-    check(20000);
-    WiFi.disconnect();
-
-    for(int i = 0; i < 3; i++) { 
-        WiFi.begin("Station 54", "Local1747");
-        check(2000);
-        WiFi.disconnect();
-    }
-    WiFi.begin("Station 54", "Local1747");
-    check(10000);
-    WiFi.disconnect();
-
-    WiFi.begin("Station 54", "Local1747");
-    check(20000);
-    //CK(esp_wifi_stop());
-    WiFi.disconnect();
-    CK(esp_wifi_stop());
-    CK(esp_wifi_deinit());
-    CK(esp_wifi_init(&cfg));
-    CK(esp_wifi_start());
-    CK(WiFi.disconnect());
-    WiFi.begin("Station 54", "Local1747");
-    check(10000);
-
-    OUT("failed, rebooting\n");
-    ESP.restart();
-
-}
-#endif
-
-#include <map>
-#if 1
-void pretty_packet_handler(const WifiBeaconPacket &packet, void *) {
-  static std::map<uint64_t,Info> beacons;
-
-  if (packet.length >= 32 && (packet.data[0] & 0xfc) == 0x80) {
-    uint64_t ts = beaconTsf(packet.data);
-    uint64_t mac = beaconBssid(packet.data);
-    if (!beacons.count(mac)) 
-        beacons[mac] = Info();
-    beacons[mac].ts = ts;
-    beacons[mac].rssi = packet.rssi;
-    beacons[mac].seen2 = packet.localTimestampUsec;
-    beacons[mac].seen = packet.driverTimestampUsec;
-    beacons[mac].count++;
-
-    int maxCount = 0;
-    for(auto p : beacons) {
-        maxCount = max(maxCount, p.second.count);
-    }
-    int x = 1;
-    int tilt = 1;
-    printf("\033[%d;%dH", x*tilt, x++);
-    printf("\\   % 12s % 15s   (% 7s) (% 5s) (% 6s)  \\ \n", 
-        "Name", "Clock", "Strength", "Age", "Count");
-    printf("\033[%d;%dH", x*tilt, x++);
-    printf("\\---------------------------------------------------------------\\ \n");
-    for(auto p : beacons) {
-        if (p.second.count < maxCount / 100) 
-            continue; 
-        printf("\e[?25l");
-        printf("\033[%d;%dH", x*tilt, x++);
-        int h = floor(p.second.ts / 3600);
-        int m = floor(p.second.ts - h * 3600) / 60;
-        int s = (int)p.second.ts % 60;
-        printf("\\   %012llx % 9d:%02d:%02d   (% 7d) (% 5.0fs) (% 6d)  \\ \n", 
-            p.first, h,m,s, 
-            p.second.rssi, min(9999.0, (micros() - p.second.seen) / 1000000.0), 
-            min(p.second.count, 99999));
-    }
-    printf("\033[%d;%dH", x*tilt, x++);
-    printf("\\---------------------------------------------------------------\\ \n"); 
-  }
-  return;
-
-}
-#endif

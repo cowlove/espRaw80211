@@ -28,6 +28,7 @@ csim: ${MAIN_NAME}_csim
 ${MAIN_NAME}_csim:  
 	g++ -x c++ -g -ffunction-sections -fdata-sections -Wl,--gc-sections \
 	-fpermissive -DESP32 -DCSIM -DUBUNTU ${MAIN_NAME}.ino \
+	${HOME}/Arduino/libraries/esp32jimlib/src/espNowMux.cpp \
 	${HOME}/Arduino/libraries/esp32jimlib/src/raw80211Capture.cpp \
 	${HOME}/Arduino/libraries/esp32jimlib/src/jimlib.cpp \
 	${HOME}/Arduino/libraries/esp32csim/src/esp32csim.cpp -o $@ \
@@ -57,4 +58,3 @@ uc:
 backtrace:
 	tr ' ' '\n' | /home/jim/.arduino15/packages/esp32/tools/esp-x32/*/bin/xtensa-esp32-elf-addr2line -f -i -e /tmp/mkESP/${MAIN_NAME}_${CHIP}/*.elf
         
-
