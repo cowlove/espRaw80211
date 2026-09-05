@@ -752,9 +752,14 @@ public:
                 onReport(from, data, length);
             });
             espNowStarted = true;
-            espNowStartUsec = micros();
+            // Use the loop timestamp captured above; sampling micros() here
+            // would make nowUsec - espNowStartUsec wrap as an unsigned value
+            // on the transition iteration.
+            espNowStartUsec = nowUsec;
             nextReportUsec = espNowStartUsec;
             out("ESP-NOW exchange phase started after beacon-only survey");
+            delay(1);
+            return;
         }
         if (!espNowStarted || nowUsec - espNowStartUsec < exchangeWindowUsec) {
             if (espNowStarted && nowUsec >= nextReportUsec) {
