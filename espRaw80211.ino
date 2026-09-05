@@ -197,7 +197,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr int reportMinRssi = -85;
     static constexpr uint64_t reportPeriodUsec = 200000;
     static constexpr uint64_t defaultRendezvousUsec = 30ULL * 1000000ULL;
-    static constexpr uint32_t scoutIntervalWakes = 5;
+    static constexpr uint32_t scoutIntervalWakes = 2;
     // Beacon acquisition and ESP-NOW exchange are separate phases. Keep a
     // generous acquisition window, and allow five seconds for gossip once a
     // usable beacon has been observed.
@@ -226,6 +226,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     BeaconClaim claims[claimTableSize] = {};
     uint32_t wakeGeneration = 0;
     uint16_t reportSequence = 0;
+    uint16_t reportTxCount = 0;
+    uint16_t reportRxCount = 0;
+    uint16_t reportRxClaimCount = 0;
     size_t claimTransmitCursor = 0;
     bool scoutWake = false;
     bool scoutRendezvousWake = false;
@@ -427,6 +430,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
     void onReport(const uint8_t *from, const uint8_t *data, int length) {
+        reportRxCount++;
         if (length < (int)sizeof(BeaconReportHeader)) return;
         BeaconReportHeader header;
         memcpy(&header, data, sizeof(header));
@@ -435,6 +439,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             sizeof(BeaconClaimEntry);
         const size_t count = min((size_t)header.claimCount,
                                  min(available, reportMaxClaims));
+        reportRxClaimCount += count;
         uint64_t sender = header.senderMac;
         if (sender == 0 && from != nullptr)
             for (int i = 0; i < 6; ++i) sender = (sender << 8) | from[i];
@@ -501,6 +506,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         memcpy(buffer, &header, sizeof(header));
         privMux.send("BRPT", buffer, sizeof(header) +
                      count * sizeof(BeaconClaimEntry));
+        reportTxCount++;
     }
 
     void configureBeaconRadio() {
@@ -583,6 +589,9 @@ public:
         memset(packetLog, 0, sizeof(packetLog));
         memset(remoteStats, 0, sizeof(remoteStats));
         reportSequence = 0;
+        reportTxCount = 0;
+        reportRxCount = 0;
+        reportRxClaimCount = 0;
         beaconReceivedAtUsec = 0;
         loopCount = 0;
         startUsec = micros();
@@ -744,13 +753,14 @@ public:
         const uint64_t homeBssid = spiffsBeacon.read();
         const uint64_t candidateBssid = reportOnlyCandidate(homeBssid);
         const bool switched = advanceProposal(homeBssid, candidateBssid);
-        out("gossip %s claims %d home %012llx supporters %d proposal %012llx supporters %d age %d%s",
+        out("gossip %s claims %d home %012llx supporters %d proposal %012llx supporters %d age %d espnow tx %u rx %u claims %u%s",
             scoutRendezvousWake ? "scout-rendezvous" :
             (scoutWake ? "scout-acquire" : "home"),
             (int)claimCount(), (unsigned long long)homeBssid,
             (int)supporterCount(homeBssid),
             (unsigned long long)candidateBssid,
             (int)supporterCount(candidateBssid), spiffsProposalAge.read(),
+            reportTxCount, reportRxCount, reportRxClaimCount,
             switched ? " SWITCH" : "");
         out("deep sleep %.1f sec, goal %.1f scale %f", sleepUsec / 1000000.0,
             goal / 1000000.0, spiffsScale.read());
