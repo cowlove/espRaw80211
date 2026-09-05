@@ -198,7 +198,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr uint64_t reportPeriodUsec = 200000;
     static constexpr uint64_t defaultRendezvousUsec = 30ULL * 1000000ULL;
     static constexpr uint32_t scoutIntervalWakes = 5;
-    static constexpr uint64_t exchangeWindowUsec = 3ULL * 1000000ULL;
+    // Beacon acquisition and ESP-NOW exchange are separate phases. Keep a
+    // generous acquisition window, and allow five seconds for gossip once a
+    // usable beacon has been observed.
+    static constexpr uint64_t beaconSamplingWindowUsec = 10ULL * 1000000ULL;
+    static constexpr uint64_t exchangeWindowUsec = 5ULL * 1000000ULL;
 
     BeaconInfo packetLog[packetLogSize] = {};
     SPIFFSVariable<uint64_t> spiffsBeacon{"/beaconX", 0};
@@ -662,7 +666,8 @@ public:
             publishReport();
             nextReportUsec = nowUsec + reportPeriodUsec;
         }
-        if (packetLog[0].count == 0 && micros() - startUsec < 10000000) {
+        if (packetLog[0].count == 0 &&
+            micros() - startUsec < beaconSamplingWindowUsec) {
             delay(1);
             return;
         }
