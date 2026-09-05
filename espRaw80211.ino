@@ -426,7 +426,10 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         info.ts = beaconTsf(packet.data);
         beaconReceivedAtUsec = micros();
         mergeClaim(deviceMac, targetBeacon, wakeGeneration, packet.rssi);
-        beaconCapture.setCallback(nullptr);
+        // Locking onto the home/scout beacon only establishes the clock. Keep
+        // capture running in collection mode for the rest of the wake so the
+        // local claim set describes every beacon visible on this channel.
+        beaconCapture.setCallback(collectCallback, this);
     }
 
     void onCollect(const WifiBeaconPacket &packet) {
