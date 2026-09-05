@@ -1,60 +1,65 @@
-BOARD=esp32
-#VERBOSE=1::
+BOARD ?= esp32
+
+ifeq ($(BOARD),esp32)
 CHIP=esp32
 OTA_ADDR=192.168.68.118
-
-ifeq ($(BOARD),esp32s3)
-	CDC_ON_BOOT = 1
-	UPLOAD_PORT ?= /dev/ttyACM0
-else 
-	BUILD_EXTRA_FLAGS += -DI2S
-        BUILD_MEMORY_TYPE=qio_qspi
-endif
+BUILD_MEMORY_TYPE=qio_qspi
+BUILD_EXTRA_FLAGS += -DI2S
 ALIBS=${HOME}/Arduino/libraries
 EXCLUDE_DIRS=${ALIBS}/lvgl|${ALIBS}/LovyanGFX|${ALIBS}/esp32csim
-
-
 GIT_VERSION := "$(shell git describe --abbrev=4 --dirty --always --tags)"
 BUILD_EXTRA_FLAGS += -DGIT_VERSION=\"$(GIT_VERSION)\"
 BUILD_EXTRA_FLAGS += -DESP32CORE_V2
 include ${HOME}/Arduino/libraries/makeEspArduino/makeEspArduino.mk
 
+.PHONY: hardware-upload fixtty cat uc
 
-.PHONY: ${MAIN_NAME}_csim
-
-csim: ${MAIN_NAME}_csim
-	cp $< $@
-
-${MAIN_NAME}_csim:  
-	g++ -x c++ -g -ffunction-sections -fdata-sections -Wl,--gc-sections \
-	-fpermissive -DESP32 -DCSIM -DUBUNTU ${MAIN_NAME}.ino \
-	${HOME}/Arduino/libraries/esp32jimlib/src/espNowMux.cpp \
-	${HOME}/Arduino/libraries/esp32jimlib/src/raw80211Capture.cpp \
-	${HOME}/Arduino/libraries/esp32jimlib/src/jimlib.cpp \
-	${HOME}/Arduino/libraries/esp32csim/src/esp32csim.cpp -o $@ \
-	-I${HOME}/Arduino/libraries/esp32jimlib/src \
-	-I${HOME}/Arduino/libraries/esp32csim/src \
-	-I${HOME}/Arduino/libraries/esp32csim/src/csim_include
-
-
-csim:	${MAIN_NAME}_csim
+hardware-upload: upload
 
 fixtty:
 	stty -F ${UPLOAD_PORT} -hupcl -crtscts -echo raw 115200
 
-cat:    fixtty
+cat: fixtty
 	cat ${UPLOAD_PORT}
 
+uc: hardware-upload cat
 
-socat:  
-	socat udp-recvfrom:9000,fork - 
-mocat:
-	mosquitto_sub -h rp1.local -t "${MAIN_NAME}/#" -F "%I %t %p"   
+else
 
-uc:
-	make upload && make cat
+ALIBS=${HOME}/Arduino/libraries
+CSIM_LIBS=Arduino_CRC32 ArduinoJson Adafruit_HX711 esp32jimlib esp32csim
+CSIM_SRC_DIRS=$(foreach L,$(CSIM_LIBS),${ALIBS}/${L}/src)
+CSIM_SRC_DIRS+=$(foreach L,$(CSIM_LIBS),${ALIBS}/${L})
+CSIM_SRC_DIRS+=$(foreach L,$(CSIM_LIBS),${ALIBS}/${L}/src/csim_include)
+CSIM_SRCS=$(foreach DIR,$(CSIM_SRC_DIRS),$(wildcard $(DIR)/*.cpp))
+CSIM_BUILD_DIR=./build/csim
+CSIM_OBJS=$(foreach S,$(notdir $(CSIM_SRCS)),$(CSIM_BUILD_DIR)/$(S:.cpp=.o))
+CSIM_INC=$(foreach DIR,$(CSIM_SRC_DIRS),-I${DIR})
+CSIM_CFLAGS=-g -O2 -MMD -fpermissive -DESP32 -DCSIM -DUBUNTU
+VPATH=$(sort $(dir $(CSIM_SRCS)))
 
+espRaw80211_csim: ${CSIM_OBJS} ${CSIM_BUILD_DIR}/espRaw80211.o | ${CSIM_BUILD_DIR}
+	g++ -g ${CSIM_CFLAGS} ${CSIM_OBJS} ${CSIM_BUILD_DIR}/espRaw80211.o -o $@
 
-backtrace:
-	tr ' ' '\n' | /home/jim/.arduino15/packages/esp32/tools/esp-x32/*/bin/xtensa-esp32-elf-addr2line -f -i -e /tmp/mkESP/${MAIN_NAME}_${CHIP}/*.elf
-        
+${CSIM_BUILD_DIR}/%.o: %.cpp | ${CSIM_BUILD_DIR}
+	g++ ${CSIM_CFLAGS} -x c++ -c ${CSIM_INC} $< -o $@
+
+${CSIM_BUILD_DIR}/%.o: %.ino | ${CSIM_BUILD_DIR}
+	g++ ${CSIM_CFLAGS} -x c++ -c ${CSIM_INC} $< -o $@
+
+${CSIM_BUILD_DIR}:
+	mkdir -p $@
+
+.PHONY: clean clear-state depend
+
+clear-state:
+	rm -rf csim-fs csim_rtc.bin csim_context_sleep.txt
+
+depend: ${CSIM_OBJS} ${CSIM_BUILD_DIR}/espRaw80211.o
+
+clean:
+	rm -rf ${CSIM_BUILD_DIR} espRaw80211_csim
+
+-include ${CSIM_BUILD_DIR}/*.d
+
+endif

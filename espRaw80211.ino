@@ -15,6 +15,10 @@
 #define CSIM_ASSERT(condition) assert(condition)
 #endif
 
+// jimlib.cpp is part of the source-discovery CSIM build and owns helpers that
+// reference the sketch-level JStuff singleton.
+JStuff j;
+
 static uint64_t beaconBssid(const uint8_t *frame) {
     uint64_t value = 0;
     for (int i = 0; i < 6; ++i) value = (value << 8) | frame[10 + i];
