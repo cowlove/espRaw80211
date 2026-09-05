@@ -84,6 +84,16 @@ def deploy(session: UsbSession, project: Path, dry_run: bool) -> None:
     screen_stuff(session, f"{upload} && {monitor}\n", dry_run)
 
 
+def build_firmware(project: Path, dry_run: bool) -> None:
+    command = ["make", "-C", str(project), "BOARD=esp32"]
+    if dry_run:
+        print("$", " ".join(command))
+        return
+    print("Building ESP32 firmware once before starting uploads...")
+    subprocess.run(command, check=True)
+    print("ESP32 firmware build completed; starting concurrent uploads.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -103,6 +113,10 @@ def main() -> int:
         return 1
 
     print("Found:", ", ".join(session.name for session in sessions))
+    # Build before touching any screen session. A failed build leaves the
+    # existing serial monitors running and prevents concurrent make processes
+    # from fighting over the shared build directory.
+    build_firmware(args.project.resolve(), args.dry_run)
     for session in sessions:
         deploy(session, args.project.resolve(), args.dry_run)
     return 0
