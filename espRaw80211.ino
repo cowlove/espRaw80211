@@ -196,7 +196,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr size_t reportMaxClaims = 8;
     static constexpr int reportMinRssi = -85;
     static constexpr uint64_t reportPeriodUsec = 200000;
-    static constexpr uint64_t defaultRendezvousUsec = 60ULL * 1000000ULL;
+    static constexpr uint64_t defaultRendezvousUsec = 30ULL * 1000000ULL;
     static constexpr uint32_t scoutIntervalWakes = 5;
     static constexpr uint64_t exchangeWindowUsec = 3ULL * 1000000ULL;
 
