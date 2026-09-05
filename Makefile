@@ -1,4 +1,5 @@
 BOARD ?= esp32
+CONTEXT_COUNT ?= 4
 
 ifeq ($(BOARD),esp32)
 CHIP=esp32
@@ -35,7 +36,8 @@ CSIM_SRCS=$(foreach DIR,$(CSIM_SRC_DIRS),$(wildcard $(DIR)/*.cpp))
 CSIM_BUILD_DIR=./build/csim
 CSIM_OBJS=$(foreach S,$(notdir $(CSIM_SRCS)),$(CSIM_BUILD_DIR)/$(S:.cpp=.o))
 CSIM_INC=$(foreach DIR,$(CSIM_SRC_DIRS),-I${DIR})
-CSIM_CFLAGS=-g -O2 -MMD -fpermissive -DESP32 -DCSIM -DUBUNTU
+CSIM_CFLAGS=-g -O2 -MMD -fpermissive -DESP32 -DCSIM -DUBUNTU \
+	-DCONTEXT_COUNT=$(CONTEXT_COUNT)
 VPATH=$(sort $(dir $(CSIM_SRCS)))
 
 espRaw80211_csim: ${CSIM_OBJS} ${CSIM_BUILD_DIR}/espRaw80211.o | ${CSIM_BUILD_DIR}

@@ -41,6 +41,9 @@ struct BeaconInfo {
 };
 
 #ifdef CSIM
+#ifndef CONTEXT_COUNT
+#define CONTEXT_COUNT 4
+#endif
 // Application-owned RF world. Each destination selects one environment, so
 // simulated devices can observe different BSSIDs and beacon clocks while the
 // capture HAL remains unaware of the RF model.
@@ -56,32 +59,41 @@ class BeaconSimulationEnvironment : public Csim_Module {
     };
     struct Environment {
         SimBeacon beacons[3];
-    } environments[4] = {
-        {{{0x000096ce8362ULL, -38, 4,  51200, 1000000, 1000000, 0},
-          {0x000096ce8363ULL, -61, 4, 204800, 2000000, 1000000, 0},
-          {0x000096ce8364ULL, -72, 4, 204800, 3000000, 1000000, 0}}},
-        {{{0x000096ce8372ULL, -40, 4,  51200, 17000000, 1000150, 0},
-          {0x000096ce8373ULL, -59, 4, 204800, 23000000, 1000150, 0},
-          {0x000096ce8374ULL, -70, 4, 204800, 29000000, 1000150, 0}}},
-        {{{0x000096ce8382ULL, -42, 4,  51200, 33000000, 999850, 0},
-          {0x000096ce8383ULL, -57, 4, 204800, 39000000, 999850, 0},
-          {0x000096ce8384ULL, -69, 4, 204800, 45000000, 999850, 0}}},
-        {{{0x000096ce8392ULL, -39, 4,  51200, 61000000, 1000300, 0},
-          {0x000096ce8393ULL, -56, 4, 204800, 67000000, 1000300, 0},
-          {0x000096ce8394ULL, -68, 4, 204800, 73000000, 1000300, 0}}},
-    };
+    } environments[CONTEXT_COUNT] = {};
     struct Destination {
         CsimWifiBeaconCaptureSource *capture;
         uint8_t channel;
         uint8_t environmentId;
-    } destinations[8] = {};
+    } destinations[CONTEXT_COUNT] = {};
     size_t destinationCount = 0;
+
+public:
+    BeaconSimulationEnvironment() {
+        for (uint8_t i = 0; i < CONTEXT_COUNT; ++i) {
+            const uint64_t bssidBase = 0x000096ce0000ULL +
+                ((uint64_t)i << 8);
+            const uint64_t tsfOrigin = 1000000ULL +
+                (uint64_t)i * 16000000ULL;
+            const uint32_t tsfRatePpm = 1000000 +
+                (int32_t)((i % 5) - 2) * 150;
+            environments[i].beacons[0] =
+                {bssidBase + 2, (int8_t)(-38 - (i % 5)), 4, 51200,
+                 tsfOrigin, tsfRatePpm, 0};
+            environments[i].beacons[1] =
+                {bssidBase + 3, (int8_t)(-60 - (i % 4)), 4, 204800,
+                 tsfOrigin + 6000000, tsfRatePpm, 0};
+            environments[i].beacons[2] =
+                {bssidBase + 4, (int8_t)(-70 - (i % 3)), 4, 204800,
+                 tsfOrigin + 12000000, tsfRatePpm, 0};
+        }
+    }
 
     uint64_t absoluteUsec() const { return sim().bootTimeUsec + micros(); }
 
     void emit(const SimBeacon &beacon, uint64_t emissionUsec,
               const Destination &destination) {
-        if (destination.environmentId >= 4 || destination.channel != beacon.channel)
+        if (destination.environmentId >= CONTEXT_COUNT ||
+            destination.channel != beacon.channel)
             return;
         uint8_t frame[36] = {};
         frame[0] = 0x80;
@@ -104,7 +116,6 @@ class BeaconSimulationEnvironment : public Csim_Module {
         destination.capture->inject(packet);
     }
 
-public:
     void addDestination(CsimWifiBeaconCaptureSource *capture, uint8_t channel,
                         uint8_t environmentId) {
         CSIM_ASSERT(destinationCount < sizeof(destinations) / sizeof(destinations[0]));
@@ -113,7 +124,8 @@ public:
 
     void loop() override {
         const uint64_t now = absoluteUsec();
-        for (uint8_t environmentId = 0; environmentId < 4; ++environmentId) {
+        for (uint8_t environmentId = 0; environmentId < CONTEXT_COUNT;
+             ++environmentId) {
             for (SimBeacon &beacon : environments[environmentId].beacons) {
                 if (beacon.nextUsec == 0) beacon.nextUsec = now;
                 while (now >= beacon.nextUsec) {
@@ -258,7 +270,7 @@ public:
 #ifdef CSIM
         // Keep the mapping deterministic and explicit: changing the number of
         // contexts or their MACs does not alter the RF environment definitions.
-        const uint8_t environmentId = (uint8_t)((address - 1) & 3);
+        const uint8_t environmentId = (uint8_t)((address & 0xff) - 1);
         beaconEnvironment.addDestination(&beaconCapture, wifiChannel,
                                          environmentId);
         currentContext = &defaultContext;
@@ -390,11 +402,19 @@ public:
     }
 };
 
-BeaconRendezvousContext rendezvous0(0xddeeff000001ULL);
 #ifdef CSIM
-BeaconRendezvousContext rendezvous1(0xddeeff000002ULL);
-BeaconRendezvousContext rendezvous2(0xddeeff000003ULL);
-BeaconRendezvousContext rendezvous3(0xddeeff000004ULL);
+struct ContextFleet {
+    BeaconRendezvousContext *contexts[CONTEXT_COUNT] = {};
+
+    ContextFleet() {
+        for (uint8_t i = 0; i < CONTEXT_COUNT; ++i)
+            contexts[i] = new BeaconRendezvousContext(
+                0xddeeff000001ULL + i);
+    }
+};
+static ContextFleet rendezvousFleet;
+#else
+BeaconRendezvousContext rendezvous0(0xddeeff000001ULL);
 #endif
 
 void setup() {
