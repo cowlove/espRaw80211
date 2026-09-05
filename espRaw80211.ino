@@ -22,14 +22,16 @@ static uint64_t beaconTsf(const uint8_t *frame) {
     return value;
 }
 
+#ifdef CSIM
+// This legacy single-context sketch uses the process-wide CSIM radio rather
+// than a private multi-device context.  The shared HardwareContext below is
+// intentionally hardware-only; CSIM applications should derive from
+// Csim_privateContext when they need isolated simulated devices.
 class HardwareContext {
 public:
-#ifdef CSIM
-    CsimWifiBeaconCaptureSource wifiBeaconCapture{&defaultContext};
-#else
-    Esp32WifiBeaconCaptureSource wifiBeaconCapture;
-#endif
+    CsimWifiBeaconCaptureSource beaconCapture{&defaultContext};
 };
+#endif
 
 static HardwareContext hardware;
 
@@ -66,7 +68,7 @@ static void serviceSyntheticBeacons() {
             packet.channel = 4;
             packet.data = frame;
             packet.length = sizeof(frame);
-            hardware.wifiBeaconCapture.inject(packet);
+            hardware.beaconCapture.inject(packet);
             beacon.nextUsec += beacon.intervalUsec;
         }
     }
@@ -109,7 +111,7 @@ void intr_oneShot(const WifiBeaconPacket &packet, void *) {
         pktLog[i].rssi = packet.rssi;
         pktLog[i].count++;
         pktLog[i].ts = beaconTsf(packet.data);
-        hardware.wifiBeaconCapture.setCallback(nullptr);
+        hardware.beaconCapture.setCallback(nullptr);
     }
 }
 
@@ -174,16 +176,16 @@ static void configureBeaconRadio() {
 void setupPromisc() {
     intr_beacon = spiffsBeacon;
     configureBeaconRadio();
-    hardware.wifiBeaconCapture.setCallback(intr_oneShot);
-    hardware.wifiBeaconCapture.start();
+    hardware.beaconCapture.setCallback(intr_oneShot);
+    hardware.beaconCapture.start();
 }
 
 //JStuff j;
 
 void setupPromisc2() { 
     intr_beacon = spiffsBeacon;
-    hardware.wifiBeaconCapture.setCallback(intr_collect);
-    hardware.wifiBeaconCapture.start();
+    hardware.beaconCapture.setCallback(intr_collect);
+    hardware.beaconCapture.start();
 }
 
 
@@ -249,13 +251,13 @@ void loop() {
         // a coordinated device must retain calibration and retry later; this
         // prototype selects a visible beacon so data collection can continue.
         OUT("No beacon packet received, picking new beacon", millis()); 
-        hardware.wifiBeaconCapture.stop();
+        hardware.beaconCapture.stop();
         configureBeaconRadio();
-        hardware.wifiBeaconCapture.setCallback(intr_collect);
-        hardware.wifiBeaconCapture.start();
+        hardware.beaconCapture.setCallback(intr_collect);
+        hardware.beaconCapture.start();
         delay(250);
         serviceSyntheticBeacons();
-        hardware.wifiBeaconCapture.stop();
+        hardware.beaconCapture.stop();
 
         int best = 0, i;
         for(i = 0; i < sizeof(pktLog)/sizeof(pktLog[0]); i++) {
