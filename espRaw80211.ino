@@ -82,9 +82,13 @@ public:
             environments[i].beacons[1] =
                 {bssidBase + 3, (int8_t)(-60 - (i % 4)), 4, 204800,
                  tsfOrigin + 6000000, tsfRatePpm, 0};
+            // One weak infrastructure beacon is common to every simulated
+            // RF environment.  Keep it weaker and less frequent than the
+            // per-context beacon so bootstrap selection remains local while
+            // later tests can reason about common competing infrastructure.
             environments[i].beacons[2] =
-                {bssidBase + 4, (int8_t)(-70 - (i % 3)), 4, 204800,
-                 tsfOrigin + 12000000, tsfRatePpm, 0};
+                {0x000096ce0fEEULL, -82, 4, 204800,
+                 5000000, 1000000, 0};
         }
     }
 
