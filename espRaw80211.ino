@@ -191,7 +191,10 @@ using BeaconRendezvousContextBase = HardwareContext;
 #endif
 
 class BeaconRendezvousContext : public BeaconRendezvousContextBase {
-    static constexpr size_t packetLogSize = 64;
+    // This is an observation inventory, not the candidate list. Keep it large
+    // enough that weak or otherwise ineligible BSSIDs are still available for
+    // post-wake diagnosis instead of being displaced by stronger beacons.
+    static constexpr size_t packetLogSize = 256;
     static constexpr size_t remoteStatsSize = 64;
     static constexpr size_t claimTableSize = 128;
     // Header + eight attributable claims, including the four-byte BRPT prefix,
@@ -330,10 +333,12 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             if (info.ssid == 0) continue;
             const uint64_t span = info.seen2 >= info.firstSeen2 ?
                 info.seen2 - info.firstSeen2 : 0;
-            out("matrix local beacon %012llx packets %d span %.3f sec maxgap %.3f sec rssi avg %d min %d max %d",
+            out("matrix scan-observed beacon %012llx packets %d span %.3f sec maxgap %.3f sec rssi avg %d min %d max %d eligible %s",
                 (unsigned long long)info.ssid, info.count,
                 span / 1000000.0, info.maxGapUsec / 1000000.0,
-                info.rssi, info.minRssi, info.maxRssi);
+                info.rssi, info.minRssi, info.maxRssi,
+                info.rssi >= reportMinRssi &&
+                info.count >= minimumCandidatePackets ? "yes" : "no");
         }
         for (const RemoteBeaconStats &stats : remoteStats) {
             if (stats.bssid == 0) continue;
