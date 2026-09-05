@@ -209,7 +209,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     // Beacon acquisition and ESP-NOW exchange are separate phases. Keep a
     // generous acquisition window, and allow five seconds for gossip once a
     // usable beacon has been observed.
-    static constexpr uint64_t beaconSamplingWindowUsec = 10ULL * 1000000ULL;
+    static constexpr uint64_t beaconSamplingWindowUsec = 5ULL * 1000000ULL;
     static constexpr uint64_t exchangeWindowUsec = 5ULL * 1000000ULL;
 
     BeaconInfo packetLog[packetLogSize] = {};
@@ -228,6 +228,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     int wifiChannel = 4;
     uint64_t startUsec = 0;
     uint64_t nextReportUsec = 0;
+    uint64_t espNowStartUsec = 0;
     uint64_t deviceMac = 0;
     int loopCount = 0;
     RemoteBeaconStats remoteStats[remoteStatsSize] = {};
@@ -243,6 +244,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     size_t claimTransmitCursor = 0;
     bool scoutWake = false;
     bool scoutRendezvousWake = false;
+    bool espNowStarted = false;
     uint64_t beaconReceivedAtUsec = 0;
 
     void loadClaims() {
@@ -667,6 +669,8 @@ public:
         scanParseRejects = 0;
         scanAccepted = 0;
         targetHits = 0;
+        espNowStarted = false;
+        espNowStartUsec = 0;
         beaconReceivedAtUsec = 0;
         loopCount = 0;
         startUsec = micros();
@@ -727,11 +731,6 @@ public:
         // Configure before ESPNowMux initializes, matching the existing
         // hardware radio ordering used by beacon capture.
         configureBeaconRadio();
-        privMux.registerReadCallback("BRPT", [this](const uint8_t *from,
-                                                     const uint8_t *data,
-                                                     int length) {
-            onReport(from, data, length);
-        });
         startOneShotCapture();
     }
 
@@ -746,14 +745,22 @@ public:
         loopCount++;
         esp_task_wdt_reset();
         const uint64_t nowUsec = micros();
-        if (nowUsec >= nextReportUsec) {
-            publishReport();
-            nextReportUsec = nowUsec + reportPeriodUsec;
+        if (!espNowStarted && nowUsec - startUsec >= beaconSamplingWindowUsec) {
+            privMux.registerReadCallback("BRPT", [this](const uint8_t *from,
+                                                         const uint8_t *data,
+                                                         int length) {
+                onReport(from, data, length);
+            });
+            espNowStarted = true;
+            espNowStartUsec = micros();
+            nextReportUsec = espNowStartUsec;
+            out("ESP-NOW exchange phase started after beacon-only survey");
         }
-        // Keep one fixed, unbiased scan window regardless of when the target
-        // beacon happens to arrive. This avoids a target-only blind period and
-        // makes packet counts comparable across all observed BSSIDs.
-        if (micros() - startUsec < beaconSamplingWindowUsec) {
+        if (!espNowStarted || nowUsec - espNowStartUsec < exchangeWindowUsec) {
+            if (espNowStarted && nowUsec >= nextReportUsec) {
+                publishReport();
+                nextReportUsec = nowUsec + reportPeriodUsec;
+            }
             delay(1);
             return;
         }
