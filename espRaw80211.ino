@@ -209,7 +209,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     // Beacon acquisition and ESP-NOW exchange are separate phases. Keep a
     // generous acquisition window, and allow five seconds for gossip once a
     // usable beacon has been observed.
-    static constexpr uint64_t beaconSamplingWindowUsec = 10ULL * 1000000ULL;
+    static constexpr uint64_t beaconSamplingWindowUsec = 5ULL * 1000000ULL;
     static constexpr uint64_t exchangeWindowUsec = 5ULL * 1000000ULL;
 
     BeaconInfo packetLog[packetLogSize] = {};
@@ -228,6 +228,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     int wifiChannel = 4;
     uint64_t startUsec = 0;
     uint64_t nextReportUsec = 0;
+    uint64_t espNowStartUsec = 0;
+    uint64_t espNowEndUsec = 0;
     uint64_t deviceMac = 0;
     int loopCount = 0;
     RemoteBeaconStats remoteStats[remoteStatsSize] = {};
@@ -237,9 +239,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint16_t reportTxCount = 0;
     uint16_t reportRxCount = 0;
     uint16_t reportRxClaimCount = 0;
+    uint32_t scanParseRejects = 0;
+    uint32_t scanAccepted = 0;
+    uint32_t targetHits = 0;
     size_t claimTransmitCursor = 0;
     bool scoutWake = false;
     bool scoutRendezvousWake = false;
+    bool espNowStarted = false;
     uint64_t beaconReceivedAtUsec = 0;
 
     void loadClaims() {
@@ -351,6 +357,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                     (unsigned long long)stats.selectingClientMacs[i],
                     (unsigned long long)stats.bssid);
         }
+        const WifiBeaconCaptureStats capture = beaconCapture.getStats();
+        const uint64_t scanSpan = micros() >= startUsec ? micros() - startUsec : 0;
+        out("matrix capture callback %u mgmt-reject %u short %u nonbeacon %u beacon %u delivered %u parse-reject %u accepted %u target-hits %u scan-span %.3f sec",
+            capture.callbackFrames, capture.nonManagementFrames,
+            capture.shortFrames, capture.nonBeaconFrames, capture.beaconFrames,
+            capture.deliveredFrames, scanParseRejects, scanAccepted, targetHits,
+            scanSpan / 1000000.0);
         out("matrix end");
     }
 
@@ -380,7 +393,6 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint64_t reportOnlyCandidate(uint64_t homeBssid) const {
         uint64_t best = homeBssid;
         size_t bestSupport = supporterCount(homeBssid);
-        int bestRssi = -127;
         for (const BeaconInfo &visible : packetLog) {
             if (visible.ssid == 0 || visible.rssi < reportMinRssi ||
                 visible.count < minimumCandidatePackets)
@@ -389,17 +401,15 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             if (!supportersInclude(visible.ssid, homeBssid) ||
                 support < bestSupport)
                 continue;
-            const BeaconInfo *bestInfo = nullptr;
-            for (const BeaconInfo &candidate : packetLog)
-                if (candidate.ssid == best) bestInfo = &candidate;
+            // Rendezvous potential is the primary objective. Local packet
+            // quality is only an eligibility gate; it must never defeat a
+            // candidate with more peer support. When support is equal, use a
+            // deterministic BSSID ordering so devices do not split because
+            // their local packet counts differ.
             if (best == homeBssid || support > bestSupport ||
-                (support == bestSupport && bestInfo != nullptr &&
-                 betterQuality(visible, *bestInfo)) ||
-                (support == bestSupport && bestInfo != nullptr &&
-                 !betterQuality(*bestInfo, visible) && visible.ssid < best)) {
+                (support == bestSupport && visible.ssid < best)) {
                 best = visible.ssid;
                 bestSupport = support;
-                bestRssi = visible.rssi;
             }
         }
         return best;
@@ -446,12 +456,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         return true;
     }
 
-    static void oneShotCallback(const WifiBeaconPacket &packet, void *arg) {
-        static_cast<BeaconRendezvousContext *>(arg)->onOneShot(packet);
-    }
-
-    static void collectCallback(const WifiBeaconPacket &packet, void *arg) {
-        static_cast<BeaconRendezvousContext *>(arg)->onCollect(packet);
+    static void broadScanCallback(const WifiBeaconPacket &packet, void *arg) {
+        static_cast<BeaconRendezvousContext *>(arg)->onBroadScan(packet);
     }
 
     void mergeClaim(uint64_t originMac, uint64_t bssid,
@@ -472,22 +478,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         claims[empty] = {originMac, bssid, originGeneration, rssi};
     }
 
-    void onOneShot(const WifiBeaconPacket &packet) {
-        if (packet.length < 32 || beaconBssid(packet.data) != targetBeacon) return;
-        BeaconInfo &info = packetLog[0];
-        info.ssid = targetBeacon;
-        recordBeacon(info, packet);
-        beaconReceivedAtUsec = micros();
-        mergeClaim(deviceMac, targetBeacon, wakeGeneration, packet.rssi);
-        // Locking onto the home/scout beacon only establishes the clock. Keep
-        // capture running in collection mode for the rest of the wake so the
-        // local claim set describes every beacon visible on this channel.
-        beaconCapture.setCallback(collectCallback, this);
-    }
-
-    void onCollect(const WifiBeaconPacket &packet) {
-        if (packet.length < 32) return;
+    void onBroadScan(const WifiBeaconPacket &packet) {
+        if (packet.length < 32) {
+            scanParseRejects++;
+            return;
+        }
         const uint64_t bssid = beaconBssid(packet.data);
+        scanAccepted++;
+        if (bssid == targetBeacon) targetHits++;
         size_t i;
         for (i = 0; i < packetLogSize; ++i) {
             if (packetLog[i].ssid == bssid) {
@@ -503,7 +501,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             if (score(packetLog[i]) <= score(packetLog[worst])) worst = i;
         }
         packetLog[worst].ssid = bssid;
-        onCollect(packet);
+        onBroadScan(packet);
     }
 
     void onReport(const uint8_t *from, const uint8_t *data, int length) {
@@ -600,13 +598,10 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
     void startOneShotCapture() {
-        beaconCapture.setCallback(oneShotCallback, this);
-        beaconCapture.start();
-    }
-
-    void startCollection() {
-        targetBeacon = spiffsBeacon;
-        beaconCapture.setCallback(collectCallback, this);
+        // Every wake is a broad scan. The target beacon is tracked as one of
+        // the scan entries and the most recent target packet is used for
+        // clock alignment when the window closes.
+        beaconCapture.setCallback(broadScanCallback, this);
         beaconCapture.start();
     }
 
@@ -669,6 +664,12 @@ public:
         reportTxCount = 0;
         reportRxCount = 0;
         reportRxClaimCount = 0;
+        scanParseRejects = 0;
+        scanAccepted = 0;
+        targetHits = 0;
+        espNowStarted = false;
+        espNowStartUsec = 0;
+        espNowEndUsec = 0;
         beaconReceivedAtUsec = 0;
         loopCount = 0;
         startUsec = micros();
@@ -729,11 +730,6 @@ public:
         // Configure before ESPNowMux initializes, matching the existing
         // hardware radio ordering used by beacon capture.
         configureBeaconRadio();
-        privMux.registerReadCallback("BRPT", [this](const uint8_t *from,
-                                                     const uint8_t *data,
-                                                     int length) {
-            onReport(from, data, length);
-        });
         startOneShotCapture();
     }
 
@@ -748,29 +744,43 @@ public:
         loopCount++;
         esp_task_wdt_reset();
         const uint64_t nowUsec = micros();
-        if (nowUsec >= nextReportUsec) {
-            publishReport();
-            nextReportUsec = nowUsec + reportPeriodUsec;
-        }
-        if (packetLog[0].count == 0 &&
-            micros() - startUsec < beaconSamplingWindowUsec) {
+        if (!espNowStarted && nowUsec - startUsec >= beaconSamplingWindowUsec) {
+            privMux.registerReadCallback("BRPT", [this](const uint8_t *from,
+                                                         const uint8_t *data,
+                                                         int length) {
+                onReport(from, data, length);
+            });
+            espNowStarted = true;
+            // Use the loop timestamp captured above; sampling micros() here
+            // would make nowUsec - espNowStartUsec wrap as an unsigned value
+            // on the transition iteration.
+            espNowStartUsec = nowUsec;
+            espNowEndUsec = nowUsec + exchangeWindowUsec;
+            nextReportUsec = espNowStartUsec;
+            out("ESP-NOW exchange phase started after beacon-only survey");
             delay(1);
             return;
         }
-        if (packetLog[0].count != 0 && beaconReceivedAtUsec != 0 &&
-            micros() - beaconReceivedAtUsec < exchangeWindowUsec) {
+        if (!espNowStarted || nowUsec < espNowEndUsec) {
+            if (espNowStarted && nowUsec >= nextReportUsec) {
+                publishReport();
+                nextReportUsec = nowUsec + reportPeriodUsec;
+            }
             delay(1);
             return;
         }
 
-        BeaconInfo result = packetLog[0];
-        BeaconInfo *beacon = &result;
+        BeaconInfo result = {};
+        BeaconInfo *beacon = nullptr;
+        for (BeaconInfo &info : packetLog) {
+            if (info.ssid == targetBeacon && info.count != 0) {
+                result = info;
+                beacon = &result;
+                break;
+            }
+        }
         if (result.count == 0) {
-            out("No beacon packet received, picking new beacon");
-            beaconCapture.stop();
-            startCollection();
-            delay(250);
-            beaconCapture.stop();
+            out("Target beacon not received in broad scan, picking best observed beacon");
             const int best = bestBeaconIndex();
             out("best beacon: %02d %012llx %3d %6d %016llx %016llx", best,
                 (unsigned long long)packetLog[best].ssid, packetLog[best].rssi,
@@ -830,14 +840,17 @@ public:
         const uint64_t homeBssid = spiffsBeacon.read();
         const uint64_t candidateBssid = reportOnlyCandidate(homeBssid);
         const bool switched = advanceProposal(homeBssid, candidateBssid);
-        out("gossip %s claims %d home %012llx supporters %d proposal %012llx supporters %d age %d espnow tx %u rx %u claims %u%s",
+        out("gossip %s claims %d home %012llx supporters %d proposal %012llx supporters %d age %d espnow tx %u ok %u fail %u busy %u rx %u claims %u scan accepted %u target %u parse-reject %u%s",
             scoutRendezvousWake ? "scout-rendezvous" :
             (scoutWake ? "scout-acquire" : "home"),
             (int)claimCount(), (unsigned long long)homeBssid,
             (int)supporterCount(homeBssid),
             (unsigned long long)candidateBssid,
             (int)supporterCount(candidateBssid), spiffsProposalAge.read(),
-            reportTxCount, reportRxCount, reportRxClaimCount,
+            reportTxCount, privMux.getSendSuccesses(),
+            privMux.getSendFailures(), privMux.getSendBusyDrops(),
+            reportRxCount, reportRxClaimCount, scanAccepted, targetHits,
+            scanParseRejects,
             switched ? " SWITCH" : "");
         dumpDeviceBeaconMatrix();
         out("deep sleep %.1f sec, goal %.1f scale %f", sleepUsec / 1000000.0,
