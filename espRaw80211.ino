@@ -382,7 +382,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 continue;
             const size_t support = supporterCount(visible.ssid);
             if (!supportersInclude(visible.ssid, homeBssid) ||
-                support <= bestSupport)
+                support < bestSupport)
                 continue;
             const BeaconInfo *bestInfo = nullptr;
             for (const BeaconInfo &candidate : packetLog)
