@@ -38,6 +38,10 @@ struct BeaconInfo {
     int count = 0;
     uint64_t seen = 0;
     uint64_t seen2 = 0;
+    uint64_t firstSeen2 = 0;
+    uint64_t maxGapUsec = 0;
+    int minRssi = 0;
+    int maxRssi = 0;
 };
 
 // Application-level rendezvous advertisement.  Keep this deliberately small:
@@ -271,6 +275,38 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 
     static int score(const BeaconInfo &info) { return info.count; }
 
+    static bool betterQuality(const BeaconInfo &a, const BeaconInfo &b) {
+        if (a.count != b.count) return a.count > b.count;
+        const uint64_t aSpan = a.seen2 >= a.firstSeen2 ?
+            a.seen2 - a.firstSeen2 : 0;
+        const uint64_t bSpan = b.seen2 >= b.firstSeen2 ?
+            b.seen2 - b.firstSeen2 : 0;
+        if (aSpan != bSpan) return aSpan > bSpan;
+        if (a.maxGapUsec != b.maxGapUsec)
+            return a.maxGapUsec < b.maxGapUsec;
+        return a.rssi > b.rssi;
+    }
+
+    void recordBeacon(BeaconInfo &info, const WifiBeaconPacket &packet) {
+        const uint64_t now = packet.localTimestampUsec;
+        if (info.count == 0) {
+            info.firstSeen2 = now;
+            info.minRssi = packet.rssi;
+            info.maxRssi = packet.rssi;
+        } else {
+            const uint64_t gap = now >= info.seen2 ? now - info.seen2 : 0;
+            info.maxGapUsec = max(info.maxGapUsec, gap);
+            info.minRssi = min(info.minRssi, (int)packet.rssi);
+            info.maxRssi = max(info.maxRssi, (int)packet.rssi);
+        }
+        info.seen2 = now;
+        info.seen = packet.driverTimestampUsec;
+        info.rssi = (packet.rssi + info.count * info.rssi) /
+                    (info.count + 1);
+        info.count++;
+        info.ts = beaconTsf(packet.data);
+    }
+
     size_t claimCount() const {
         size_t count = 0;
         for (const BeaconClaim &claim : claims)
@@ -288,6 +324,15 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 (unsigned long long)claim.bssid,
                 claim.originGeneration, (int)claim.rssi,
                 claim.bssid == homeBssid ? " selected-home" : "");
+        }
+        for (const BeaconInfo &info : packetLog) {
+            if (info.ssid == 0) continue;
+            const uint64_t span = info.seen2 >= info.firstSeen2 ?
+                info.seen2 - info.firstSeen2 : 0;
+            out("matrix local beacon %012llx packets %d span %.3f sec maxgap %.3f sec rssi avg %d min %d max %d",
+                (unsigned long long)info.ssid, info.count,
+                span / 1000000.0, info.maxGapUsec / 1000000.0,
+                info.rssi, info.minRssi, info.maxRssi);
         }
         for (const RemoteBeaconStats &stats : remoteStats) {
             if (stats.bssid == 0) continue;
@@ -336,10 +381,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             if (!supportersInclude(visible.ssid, homeBssid) ||
                 support <= bestSupport)
                 continue;
+            const BeaconInfo *bestInfo = nullptr;
+            for (const BeaconInfo &candidate : packetLog)
+                if (candidate.ssid == best) bestInfo = &candidate;
             if (best == homeBssid || support > bestSupport ||
-                (support == bestSupport && visible.rssi > bestRssi) ||
-                (support == bestSupport && visible.rssi == bestRssi &&
-                 visible.ssid < best)) {
+                (support == bestSupport && bestInfo != nullptr &&
+                 betterQuality(visible, *bestInfo)) ||
+                (support == bestSupport && bestInfo != nullptr &&
+                 !betterQuality(*bestInfo, visible) && visible.ssid < best)) {
                 best = visible.ssid;
                 bestSupport = support;
                 bestRssi = visible.rssi;
@@ -419,11 +468,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         if (packet.length < 32 || beaconBssid(packet.data) != targetBeacon) return;
         BeaconInfo &info = packetLog[0];
         info.ssid = targetBeacon;
-        info.seen2 = packet.localTimestampUsec;
-        info.seen = packet.driverTimestampUsec;
-        info.rssi = packet.rssi;
-        info.count++;
-        info.ts = beaconTsf(packet.data);
+        recordBeacon(info, packet);
         beaconReceivedAtUsec = micros();
         mergeClaim(deviceMac, targetBeacon, wakeGeneration, packet.rssi);
         // Locking onto the home/scout beacon only establishes the clock. Keep
@@ -439,11 +484,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         for (i = 0; i < packetLogSize; ++i) {
             if (packetLog[i].ssid == bssid) {
                 BeaconInfo &info = packetLog[i];
-                info.seen2 = packet.localTimestampUsec;
-                info.seen = packet.driverTimestampUsec;
-                info.rssi = (packet.rssi + info.count * info.rssi) / (info.count + 1);
-                info.count++;
-                info.ts = beaconTsf(packet.data);
+                recordBeacon(info, packet);
                 mergeClaim(deviceMac, bssid, wakeGeneration, packet.rssi);
                 return;
             }
