@@ -229,6 +229,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint64_t startUsec = 0;
     uint64_t nextReportUsec = 0;
     uint64_t espNowStartUsec = 0;
+    uint64_t espNowEndUsec = 0;
     uint64_t deviceMac = 0;
     int loopCount = 0;
     RemoteBeaconStats remoteStats[remoteStatsSize] = {};
@@ -671,6 +672,7 @@ public:
         targetHits = 0;
         espNowStarted = false;
         espNowStartUsec = 0;
+        espNowEndUsec = 0;
         beaconReceivedAtUsec = 0;
         loopCount = 0;
         startUsec = micros();
@@ -756,12 +758,13 @@ public:
             // would make nowUsec - espNowStartUsec wrap as an unsigned value
             // on the transition iteration.
             espNowStartUsec = nowUsec;
+            espNowEndUsec = nowUsec + exchangeWindowUsec;
             nextReportUsec = espNowStartUsec;
             out("ESP-NOW exchange phase started after beacon-only survey");
             delay(1);
             return;
         }
-        if (!espNowStarted || nowUsec - espNowStartUsec < exchangeWindowUsec) {
+        if (!espNowStarted || nowUsec < espNowEndUsec) {
             if (espNowStarted && nowUsec >= nextReportUsec) {
                 publishReport();
                 nextReportUsec = nowUsec + reportPeriodUsec;
