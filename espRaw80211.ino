@@ -446,12 +446,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         return true;
     }
 
-    static void oneShotCallback(const WifiBeaconPacket &packet, void *arg) {
-        static_cast<BeaconRendezvousContext *>(arg)->onOneShot(packet);
-    }
-
-    static void collectCallback(const WifiBeaconPacket &packet, void *arg) {
-        static_cast<BeaconRendezvousContext *>(arg)->onCollect(packet);
+    static void broadScanCallback(const WifiBeaconPacket &packet, void *arg) {
+        static_cast<BeaconRendezvousContext *>(arg)->onBroadScan(packet);
     }
 
     void mergeClaim(uint64_t originMac, uint64_t bssid,
@@ -472,20 +468,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         claims[empty] = {originMac, bssid, originGeneration, rssi};
     }
 
-    void onOneShot(const WifiBeaconPacket &packet) {
-        if (packet.length < 32 || beaconBssid(packet.data) != targetBeacon) return;
-        BeaconInfo &info = packetLog[0];
-        info.ssid = targetBeacon;
-        recordBeacon(info, packet);
-        beaconReceivedAtUsec = micros();
-        mergeClaim(deviceMac, targetBeacon, wakeGeneration, packet.rssi);
-        // Locking onto the home/scout beacon only establishes the clock. Keep
-        // capture running in collection mode for the rest of the wake so the
-        // local claim set describes every beacon visible on this channel.
-        beaconCapture.setCallback(collectCallback, this);
-    }
-
-    void onCollect(const WifiBeaconPacket &packet) {
+    void onBroadScan(const WifiBeaconPacket &packet) {
         if (packet.length < 32) return;
         const uint64_t bssid = beaconBssid(packet.data);
         size_t i;
@@ -503,7 +486,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             if (score(packetLog[i]) <= score(packetLog[worst])) worst = i;
         }
         packetLog[worst].ssid = bssid;
-        onCollect(packet);
+        onBroadScan(packet);
     }
 
     void onReport(const uint8_t *from, const uint8_t *data, int length) {
@@ -600,13 +583,10 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
     void startOneShotCapture() {
-        beaconCapture.setCallback(oneShotCallback, this);
-        beaconCapture.start();
-    }
-
-    void startCollection() {
-        targetBeacon = spiffsBeacon;
-        beaconCapture.setCallback(collectCallback, this);
+        // Every wake is a broad scan. The target beacon is tracked as one of
+        // the scan entries and the most recent target packet is used for
+        // clock alignment when the window closes.
+        beaconCapture.setCallback(broadScanCallback, this);
         beaconCapture.start();
     }
 
@@ -752,25 +732,25 @@ public:
             publishReport();
             nextReportUsec = nowUsec + reportPeriodUsec;
         }
-        if (packetLog[0].count == 0 &&
-            micros() - startUsec < beaconSamplingWindowUsec) {
-            delay(1);
-            return;
-        }
-        if (packetLog[0].count != 0 && beaconReceivedAtUsec != 0 &&
-            micros() - beaconReceivedAtUsec < exchangeWindowUsec) {
+        // Keep one fixed, unbiased scan window regardless of when the target
+        // beacon happens to arrive. This avoids a target-only blind period and
+        // makes packet counts comparable across all observed BSSIDs.
+        if (micros() - startUsec < beaconSamplingWindowUsec) {
             delay(1);
             return;
         }
 
-        BeaconInfo result = packetLog[0];
-        BeaconInfo *beacon = &result;
+        BeaconInfo result = {};
+        BeaconInfo *beacon = nullptr;
+        for (BeaconInfo &info : packetLog) {
+            if (info.ssid == targetBeacon && info.count != 0) {
+                result = info;
+                beacon = &result;
+                break;
+            }
+        }
         if (result.count == 0) {
-            out("No beacon packet received, picking new beacon");
-            beaconCapture.stop();
-            startCollection();
-            delay(250);
-            beaconCapture.stop();
+            out("Target beacon not received in broad scan, picking best observed beacon");
             const int best = bestBeaconIndex();
             out("best beacon: %02d %012llx %3d %6d %016llx %016llx", best,
                 (unsigned long long)packetLog[best].ssid, packetLog[best].rssi,
