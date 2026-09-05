@@ -199,6 +199,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     // ESPNowMux's conservative 200-byte physical packet limit.
     static constexpr size_t reportMaxClaims = 8;
     static constexpr int reportMinRssi = -85;
+    static constexpr int minimumCandidatePackets = 3;
     static constexpr uint64_t reportPeriodUsec = 200000;
     static constexpr uint64_t defaultRendezvousUsec = 30ULL * 1000000ULL;
     static constexpr uint32_t scoutIntervalWakes = 2;
@@ -376,7 +377,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         size_t bestSupport = supporterCount(homeBssid);
         int bestRssi = -127;
         for (const BeaconInfo &visible : packetLog) {
-            if (visible.ssid == 0 || visible.rssi < reportMinRssi) continue;
+            if (visible.ssid == 0 || visible.rssi < reportMinRssi ||
+                visible.count < minimumCandidatePackets)
+                continue;
             const size_t support = supporterCount(visible.ssid);
             if (!supportersInclude(visible.ssid, homeBssid) ||
                 support <= bestSupport)
