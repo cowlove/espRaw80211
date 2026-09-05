@@ -12,6 +12,7 @@ import argparse
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,11 +70,18 @@ def deploy(session: UsbSession, project: Path, dry_run: bool) -> None:
         f"| tee -a {project / session.logfile}"
     )
     # Ctrl-C stops the foreground make/cat pipeline without destroying the
-    # screen session or its shell.  The shell's && ensures logging starts only
-    # after esptool reports a successful upload.
-    command = f"\003{upload} && {monitor}\n"
+    # screen session or its shell. Send it separately from the command: some
+    # terminals consume the first command character when both arrive in one
+    # screen "stuff" payload.
     print(f"{session.name}: {session.port} -> {session.logfile}")
-    screen_stuff(session, command, dry_run)
+    screen_stuff(session, "\003", dry_run)
+    if dry_run:
+        print("  (wait 0.25s)")
+    else:
+        time.sleep(0.25)
+    # The shell's && ensures logging starts only after esptool reports a
+    # successful upload.
+    screen_stuff(session, f"{upload} && {monitor}\n", dry_run)
 
 
 def main() -> int:
