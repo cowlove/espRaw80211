@@ -88,7 +88,11 @@ class BeaconSimulationEnvironment : public Csim_Module {
         memcpy(frame + 24, &tsf, sizeof(tsf));
         WifiBeaconPacket packet;
         packet.driverTimestampUsec = emissionUsec & 0xffffffffULL;
-        packet.localTimestampUsec = emissionUsec;
+        // The application timing math intentionally uses the ESP32-style
+        // boot-relative callback clock.  Keep the RF scheduler's absolute
+        // time internal to the simulator and present the same clock shape as
+        // the hardware callback.
+        packet.localTimestampUsec = emissionUsec - sim().bootTimeUsec;
         packet.rssi = beacon.rssi;
         packet.channel = beacon.channel;
         packet.data = frame;
@@ -233,8 +237,12 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         va_start(args, fmt);
 #ifdef CSIM
         printf("%012llx ", (unsigned long long)context->mac);
+        const double displaySeconds =
+            (sim().bootTimeUsec + micros()) / 1000000.0;
+#else
+        const double displaySeconds = millis() / 1000.0;
 #endif
-        printf("%09.3f ", millis() / 1000.0);
+        printf("%09.3f ", displaySeconds);
         vprintf(fmt, args);
         printf("\n");
         va_end(args);
@@ -265,7 +273,13 @@ public:
         loopCount = 0;
         startUsec = micros();
         SPIFFSVariableESP32Base::begin();
-        printf("%09.3f setup() waiting for %llx\n", millis() / 1000.0,
+#ifdef CSIM
+        const double setupSeconds =
+            (sim().bootTimeUsec + micros()) / 1000000.0;
+#else
+        const double setupSeconds = millis() / 1000.0;
+#endif
+        printf("%09.3f setup() waiting for %llx\n", setupSeconds,
                (unsigned long long)spiffsBeacon.read());
 #ifndef CSIM
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -291,7 +305,7 @@ public:
 #endif
         loopCount++;
         esp_task_wdt_reset();
-        if (packetLog[0].count == 0 && millis() - startUsec / 1000 < 10000) {
+        if (packetLog[0].count == 0 && micros() - startUsec < 10000000) {
             delay(1);
             return;
         }
