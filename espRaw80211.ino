@@ -54,6 +54,7 @@ struct __attribute__((packed)) BeaconReportEntry {
     uint64_t bssid;
     int8_t rssi;
     uint16_t observations;
+    uint8_t selectingClients;
 };
 
 struct RemoteBeaconStats {
@@ -64,6 +65,8 @@ struct RemoteBeaconStats {
     int8_t strongestRssi = -127;
     int8_t lastRssi = -127;
     uint64_t lastSender = 0;
+    uint64_t selectingClientMacs[16] = {};
+    uint8_t selectingClientCount = 0;
 };
 
 #ifdef CSIM
@@ -178,7 +181,9 @@ using BeaconRendezvousContextBase = HardwareContext;
 class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr size_t packetLogSize = 64;
     static constexpr size_t remoteStatsSize = 64;
-    static constexpr size_t reportMaxBeacons = 15;
+    // Header + 14 entries, including the four-byte BRPT prefix, stays within
+    // ESPNowMux's conservative 200-byte physical packet limit.
+    static constexpr size_t reportMaxBeacons = 14;
     static constexpr int reportMinRssi = -85;
     static constexpr uint64_t reportPeriodUsec = 200000;
     static constexpr uint64_t defaultRendezvousUsec = 60ULL * 1000000ULL;
@@ -247,7 +252,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         if (length < (int)sizeof(BeaconReportHeader)) return;
         BeaconReportHeader header;
         memcpy(&header, data, sizeof(header));
-        if (header.version != 1) return;
+        if (header.version != 2) return;
         const size_t available = (length - sizeof(header)) /
             sizeof(BeaconReportEntry);
         const size_t count = min((size_t)header.beaconCount,
@@ -273,14 +278,26 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             stats.lastRssi = entry.rssi;
             stats.strongestRssi = max(stats.strongestRssi, entry.rssi);
             stats.lastSender = sender;
-            if (entry.bssid == header.selectedBeacon) stats.selectedReports++;
+            if (entry.bssid == header.selectedBeacon) {
+                stats.selectedReports++;
+                bool knownClient = false;
+                for (uint8_t j = 0; j < stats.selectingClientCount; ++j)
+                    if (stats.selectingClientMacs[j] == sender)
+                        knownClient = true;
+                if (!knownClient && stats.selectingClientCount <
+                    sizeof(stats.selectingClientMacs) /
+                    sizeof(stats.selectingClientMacs[0])) {
+                    stats.selectingClientMacs[stats.selectingClientCount++] =
+                        sender;
+                }
+            }
         }
     }
 
     void publishReport() {
         uint8_t buffer[sizeof(BeaconReportHeader) +
                        reportMaxBeacons * sizeof(BeaconReportEntry)] = {};
-        BeaconReportHeader header = {1, deviceMac, spiffsBeacon.read(), 0};
+        BeaconReportHeader header = {2, deviceMac, spiffsBeacon.read(), 0};
         memcpy(buffer, &header, sizeof(header));
         size_t count = 0;
         // packetLog is maintained in observation-count order only loosely; the
@@ -291,7 +308,12 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             if (info.ssid == 0 || info.rssi < reportMinRssi) continue;
             BeaconReportEntry entry = {
                 info.ssid, (int8_t)info.rssi,
-                (uint16_t)min<uint64_t>(info.count, 0xffff)};
+                (uint16_t)min<uint64_t>(info.count, 0xffff), 0};
+            for (size_t j = 0; j < remoteStatsSize; ++j)
+                if (remoteStats[j].bssid == info.ssid) {
+                    entry.selectingClients = remoteStats[j].selectingClientCount;
+                    break;
+                }
             memcpy(buffer + sizeof(header) + count * sizeof(entry),
                    &entry, sizeof(entry));
             count++;
