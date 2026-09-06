@@ -54,6 +54,7 @@ struct __attribute__((packed)) BeaconReportHeader {
     uint32_t wakeGeneration;
     uint16_t packetSequence;
     uint8_t claimCount;
+    uint8_t associationCount;
 };
 
 struct __attribute__((packed)) BeaconClaimEntry {
@@ -62,6 +63,18 @@ struct __attribute__((packed)) BeaconClaimEntry {
     uint32_t originGeneration;
     int8_t rssi;
 };
+
+struct __attribute__((packed)) BeaconAssociationEntry {
+    uint64_t originMac;
+    uint64_t selectedBeacon;
+    uint32_t originGeneration;
+    uint16_t ageSeconds;
+};
+
+static_assert(sizeof(BeaconReportHeader) +
+              3 * sizeof(BeaconClaimEntry) +
+              4 * sizeof(BeaconAssociationEntry) + 4 <= 200,
+              "BRPT report exceeds ESPNowMux packet budget");
 
 struct BeaconClaim {
     uint64_t originMac = 0;
@@ -74,6 +87,14 @@ struct BeaconClaim {
     // Runtime-only: persisted claims remain relay knowledge, but only claims
     // refreshed or received during this wake may vote in a decision.
     uint32_t receivedWakeGeneration = 0;
+};
+
+struct BeaconAssociation {
+    uint64_t originMac = 0;
+    uint64_t selectedBeacon = 0;
+    uint32_t originGeneration = 0;
+    uint32_t ageSeconds = 0;
+    uint64_t storedAtUsec = 0;
 };
 
 struct RemoteBeaconStats {
@@ -203,16 +224,19 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr size_t packetLogSize = 256;
     static constexpr size_t remoteStatsSize = 64;
     static constexpr size_t claimTableSize = 128;
-    // Header + eight attributable claims, including the four-byte BRPT prefix,
-    // stays within
-    // ESPNowMux's conservative 200-byte physical packet limit.
-    static constexpr size_t reportMaxClaims = 8;
+    static constexpr size_t associationTableSize = 32;
+    // Header plus rotating visibility and association records, including the
+    // four-byte BRPT prefix, stays within ESPNowMux's conservative 200-byte
+    // physical packet limit.
+    static constexpr size_t reportMaxClaims = 3;
+    static constexpr size_t reportMaxAssociations = 4;
     static constexpr int reportMinRssi = -85;
     static constexpr int minimumCandidatePackets = 3;
     static constexpr uint64_t reportPeriodUsec = 200000;
     static constexpr uint64_t defaultRendezvousUsec = 30ULL * 1000000ULL;
     static constexpr uint32_t scoutIntervalWakes = 2;
     static constexpr uint32_t claimFreshnessWakes = 20;
+    static constexpr uint32_t associationFreshnessSeconds = 150;
     // Beacon acquisition and ESP-NOW exchange are separate phases. Keep a
     // generous acquisition window, and allow five seconds for gossip once a
     // usable beacon has been observed.
@@ -227,6 +251,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     SPIFFSVariable<int> spiffsCurrentRep{"/currentRep", 0};
     SPIFFSVariable<uint32_t> spiffsClaimGeneration{"/claimGen", 0};
     SPIFFSVariable<string> spiffsClaims{"/claims", ""};
+    SPIFFSVariable<string> spiffsAssociations{"/associations", ""};
     SPIFFSVariable<int> spiffsScoutPhase{"/scoutPhase", 0};
     SPIFFSVariable<uint64_t> spiffsScoutBeacon{"/scoutBeacon", 0};
     SPIFFSVariable<uint64_t> spiffsProposalBeacon{"/proposal", 0};
@@ -241,6 +266,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     int loopCount = 0;
     RemoteBeaconStats remoteStats[remoteStatsSize] = {};
     BeaconClaim claims[claimTableSize] = {};
+    BeaconAssociation associations[associationTableSize] = {};
     uint32_t wakeGeneration = 0;
     uint16_t reportSequence = 0;
     uint16_t reportTxCount = 0;
@@ -257,6 +283,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint32_t scanAccepted = 0;
     uint32_t targetHits = 0;
     size_t claimTransmitCursor = 0;
+    size_t associationTransmitCursor = 0;
     bool scoutWake = false;
     bool scoutRendezvousWake = false;
     bool espNowStarted = false;
@@ -304,6 +331,95 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             encoded += record;
         }
         spiffsClaims = encoded;
+    }
+
+    uint32_t associationAgeSeconds(const BeaconAssociation &association) const {
+        uint64_t elapsed = 0;
+        const uint64_t now = micros();
+        if (association.storedAtUsec != 0 && now >= association.storedAtUsec)
+            elapsed = (now - association.storedAtUsec) / 1000000ULL;
+        const uint64_t age = (uint64_t)association.ageSeconds + elapsed;
+        return age > UINT32_MAX ? UINT32_MAX : (uint32_t)age;
+    }
+
+    void loadAssociations() {
+        memset(associations, 0, sizeof(associations));
+        const string encoded = spiffsAssociations.read();
+        const uint64_t sleptSeconds64 =
+            spiffsSleepTime.read() / (uint64_t)1000000;
+        const uint32_t sleptSeconds = sleptSeconds64 > UINT32_MAX ?
+            UINT32_MAX : (uint32_t)sleptSeconds64;
+        size_t offset = 0;
+        size_t slot = 0;
+        while (offset < encoded.size() && slot < associationTableSize) {
+            unsigned long long origin = 0;
+            unsigned long long selected = 0;
+            unsigned generation = 0;
+            unsigned age = 0;
+            int consumed = 0;
+            const int fields = sscanf(encoded.c_str() + offset,
+                "%llx,%llx,%x,%x;%n", &origin, &selected, &generation,
+                &age, &consumed);
+            if (fields != 4 || consumed <= 0) break;
+            const uint64_t aged = (uint64_t)age + sleptSeconds;
+            associations[slot++] = {
+                (uint64_t)origin, (uint64_t)selected,
+                (uint32_t)generation,
+                aged > UINT32_MAX ? UINT32_MAX : (uint32_t)aged,
+                startUsec};
+            offset += (size_t)consumed;
+        }
+    }
+
+    void saveAssociations() {
+        string encoded;
+        char record[64];
+        for (const BeaconAssociation &association : associations) {
+            if (association.originMac == 0) continue;
+            snprintf(record, sizeof(record), "%llx,%llx,%x,%x;",
+                     (unsigned long long)association.originMac,
+                     (unsigned long long)association.selectedBeacon,
+                     association.originGeneration,
+                     associationAgeSeconds(association));
+            encoded += record;
+        }
+        spiffsAssociations = encoded;
+    }
+
+    void mergeAssociation(uint64_t originMac, uint64_t selectedBeacon,
+                          uint32_t originGeneration, uint32_t ageSeconds,
+                          bool direct = false) {
+        if (originMac == 0 || selectedBeacon == 0) return;
+        size_t empty = associationTableSize;
+        for (size_t i = 0; i < associationTableSize; ++i) {
+            BeaconAssociation &association = associations[i];
+            if (association.originMac == originMac) {
+                if (originGeneration < association.originGeneration) return;
+                const uint32_t currentAge = associationAgeSeconds(association);
+                if (originGeneration == association.originGeneration &&
+                    !direct && ageSeconds >= currentAge)
+                    return;
+                association = {originMac, selectedBeacon, originGeneration,
+                               direct ? 0U : ageSeconds, micros()};
+                return;
+            }
+            if (empty == associationTableSize && association.originMac == 0)
+                empty = i;
+        }
+        if (empty == associationTableSize) return;
+        associations[empty] = {originMac, selectedBeacon, originGeneration,
+                               direct ? 0U : ageSeconds, micros()};
+    }
+
+    size_t listenerCount(uint64_t bssid) const {
+        size_t count = 0;
+        for (const BeaconAssociation &association : associations)
+            if (association.originMac != 0 &&
+                association.selectedBeacon == bssid &&
+                associationAgeSeconds(association) <=
+                    associationFreshnessSeconds)
+                count++;
+        return count;
     }
 
     static int score(const BeaconInfo &info) { return info.count; }
@@ -357,6 +473,15 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 (unsigned long long)claim.bssid,
                 claim.originGeneration, (int)claim.rssi,
                 claim.bssid == homeBssid ? " selected-home" : "");
+        }
+        for (const BeaconAssociation &association : associations) {
+            if (association.originMac == 0) continue;
+            const uint32_t age = associationAgeSeconds(association);
+            out("matrix association device %012llx selected %012llx gen %u age %us %s",
+                (unsigned long long)association.originMac,
+                (unsigned long long)association.selectedBeacon,
+                association.originGeneration, age,
+                age <= associationFreshnessSeconds ? "fresh" : "expired");
         }
         for (const BeaconInfo &info : packetLog) {
             if (info.ssid == 0) continue;
@@ -449,12 +574,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         uint64_t best = homeBssid;
         size_t bestSupport = currentSupporterCount(homeBssid);
         size_t bestRetainedSupport = supporterCount(homeBssid);
+        size_t bestListeners = listenerCount(homeBssid);
         for (const BeaconInfo &visible : packetLog) {
             if (visible.ssid == 0 || visible.rssi < reportMinRssi ||
                 visible.count < minimumCandidatePackets)
                 continue;
             const size_t support = currentSupporterCount(visible.ssid);
             const size_t retainedSupport = supporterCount(visible.ssid);
+            const size_t listeners = listenerCount(visible.ssid);
             if (!supportersInclude(visible.ssid, homeBssid) ||
                 support < bestSupport)
                 continue;
@@ -464,6 +591,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             // deterministic BSSID ordering so devices do not split because
             // their local packet counts differ.
             const bool strongerCurrentSet = support > bestSupport;
+            const bool strongerRendezvousPool = support >= bestSupport &&
+                listeners > bestListeners;
             const bool corroboratedRetainedSuperset = support >= 2 &&
                 support == bestSupport &&
                 retainedSupport > bestRetainedSupport &&
@@ -474,11 +603,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 retainedSupportersInclude(visible.ssid, best) &&
                 retainedSupportersInclude(best, visible.ssid) &&
                 visible.ssid < best;
-            if (strongerCurrentSet || corroboratedRetainedSuperset ||
+            if (strongerCurrentSet || strongerRendezvousPool ||
+                corroboratedRetainedSuperset ||
                 corroboratedEquivalentSets) {
                 best = visible.ssid;
                 bestSupport = support;
                 bestRetainedSupport = retainedSupport;
+                bestListeners = listeners;
             }
         }
         return best;
@@ -515,8 +646,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         // visible candidate, move immediately toward that pool.  Equal or
         // closely matched pools still require two consecutive rounds.
         const bool singletonJoiningPool =
-            currentSupporterCount(homeBssid) == 1 &&
-            currentSupporterCount(candidateBssid) >= 2;
+            listenerCount(homeBssid) == 1 &&
+            listenerCount(candidateBssid) >= 2;
         if (spiffsProposalAge.read() < 2 && !singletonJoiningPool) return false;
 
         // The candidate is directly visible in this wake and has already
@@ -614,8 +745,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         if (length < (int)sizeof(BeaconReportHeader)) return;
         BeaconReportHeader header;
         memcpy(&header, data, sizeof(header));
-        if (header.version != 3) return;
-        const size_t available = (length - sizeof(header)) /
+        if (header.version != 4) return;
+        mergeAssociation(header.senderMac, header.selectedBeacon,
+                         header.wakeGeneration, 0, true);
+        const size_t claimBytesAvailable = length - sizeof(header);
+        const size_t available = claimBytesAvailable /
             sizeof(BeaconClaimEntry);
         const size_t count = min((size_t)header.claimCount,
                                  min(available, reportMaxClaims));
@@ -666,6 +800,20 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 }
             }
         }
+        const size_t associationOffset = sizeof(header) +
+            count * sizeof(BeaconClaimEntry);
+        const size_t associationAvailable = length >= (int)associationOffset ?
+            (length - associationOffset) / sizeof(BeaconAssociationEntry) : 0;
+        const size_t associationCount = min(
+            (size_t)header.associationCount,
+            min(associationAvailable, reportMaxAssociations));
+        for (size_t i = 0; i < associationCount; ++i) {
+            BeaconAssociationEntry entry;
+            memcpy(&entry, data + associationOffset +
+                   i * sizeof(entry), sizeof(entry));
+            mergeAssociation(entry.originMac, entry.selectedBeacon,
+                             entry.originGeneration, entry.ageSeconds);
+        }
     }
 
     void dumpExchangePeers() const {
@@ -709,9 +857,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 
     void publishReport() {
         uint8_t buffer[sizeof(BeaconReportHeader) +
-                       reportMaxClaims * sizeof(BeaconClaimEntry)] = {};
-        BeaconReportHeader header = {3, deviceMac, spiffsBeacon.read(),
-                                     wakeGeneration, reportSequence++, 0};
+                       reportMaxClaims * sizeof(BeaconClaimEntry) +
+                       reportMaxAssociations *
+                           sizeof(BeaconAssociationEntry)] = {};
+        mergeAssociation(deviceMac, spiffsBeacon.read(), wakeGeneration,
+                         0, true);
+        BeaconReportHeader header = {4, deviceMac, spiffsBeacon.read(),
+                                     wakeGeneration, reportSequence++, 0, 0};
         memcpy(buffer, &header, sizeof(header));
         size_t count = 0;
         // Rotate through the longer-lived claim table. Repeated 5 Hz packets
@@ -734,9 +886,32 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             count++;
         }
         header.claimCount = (uint8_t)count;
+        size_t associationCount = 0;
+        size_t associationVisited = 0;
+        const size_t associationOffset = sizeof(header) +
+            count * sizeof(BeaconClaimEntry);
+        while (associationVisited < associationTableSize &&
+               associationCount < reportMaxAssociations) {
+            const size_t i = associationTransmitCursor++ %
+                associationTableSize;
+            associationVisited++;
+            const BeaconAssociation &association = associations[i];
+            if (association.originMac == 0) continue;
+            const uint32_t age = associationAgeSeconds(association);
+            if (age > associationFreshnessSeconds) continue;
+            BeaconAssociationEntry entry = {
+                association.originMac, association.selectedBeacon,
+                association.originGeneration,
+                (uint16_t)min(age, (uint32_t)UINT16_MAX)};
+            memcpy(buffer + associationOffset + associationCount *
+                   sizeof(entry), &entry, sizeof(entry));
+            associationCount++;
+        }
+        header.associationCount = (uint8_t)associationCount;
         memcpy(buffer, &header, sizeof(header));
         privMux.send("BRPT", buffer, sizeof(header) +
-                     count * sizeof(BeaconClaimEntry));
+                     count * sizeof(BeaconClaimEntry) +
+                     associationCount * sizeof(BeaconAssociationEntry));
         reportTxCount++;
     }
 
@@ -855,6 +1030,7 @@ public:
 #endif
         SPIFFSVariableESP32Base::begin();
         loadClaims();
+        loadAssociations();
         wakeGeneration = spiffsClaimGeneration.read() + 1;
         spiffsClaimGeneration = wakeGeneration;
         const uint64_t homeBeacon = spiffsBeacon.read();
@@ -1032,14 +1208,16 @@ public:
             spiffsProposalBeacon = 0;
             spiffsProposalAge = 0;
         }
-        out("gossip %s exchange %s claims %d home %012llx supporters current %d retained %d proposal %012llx supporters current %d retained %d age %d espnow tx %u ok %u fail %u busy %u rawrx %u rx %u valid %u peers %u claims %u scan accepted %u target %u parse-reject %u channel %d exchange-usec %llu-%llu last-rx %012llx%s",
+        out("gossip %s exchange %s claims %d home %012llx listeners %d visibility current %d retained %d proposal %012llx listeners %d visibility current %d retained %d age %d espnow tx %u ok %u fail %u busy %u rawrx %u rx %u valid %u peers %u claims %u scan accepted %u target %u parse-reject %u channel %d exchange-usec %llu-%llu last-rx %012llx%s",
             scoutRendezvousWake ? "scout-rendezvous" :
             (scoutWake ? "scout-acquire" : "home"),
             healthyExchange ? "healthy" : "incomplete",
             (int)claimCount(), (unsigned long long)homeBssid,
+            (int)listenerCount(homeBssid),
             (int)currentSupporterCount(homeBssid),
             (int)supporterCount(homeBssid),
             (unsigned long long)candidateBssid,
+            (int)listenerCount(candidateBssid),
             (int)currentSupporterCount(candidateBssid),
             (int)supporterCount(candidateBssid), spiffsProposalAge.read(),
             reportTxCount, privMux.getSendSuccesses(),
@@ -1070,6 +1248,7 @@ public:
         // one-shot capture followed immediately by deep sleep.
         publishReport();
         saveClaims();
+        saveAssociations();
         beaconCapture.stop();
         esp_sleep_enable_timer_wakeup(sleepUsec);
         esp_deep_sleep_start();
