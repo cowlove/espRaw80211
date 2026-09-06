@@ -13,7 +13,7 @@ from pathlib import Path
 STAMP = re.compile(r"^(\d+\.\d+)")
 START = "ESP-NOW exchange phase started"
 END = "deep sleep "
-GOSSIP = re.compile(r"gossip .*? home ([0-9a-f]+) listeners (\d+)")
+GOSSIP = re.compile(r"gossip .*? exchange (healthy|incomplete).*? home ([0-9a-f]+) listeners (\d+)")
 CONSENSUS = re.compile(r"test consensus (\d+)/10")
 
 
@@ -23,6 +23,7 @@ class Cycle:
     end: float
     home: str = "-"
     listeners: str = "-"
+    healthy: bool = False
     consensus: str = "-"
     reset: str = ""
 
@@ -59,7 +60,8 @@ def parse(data: bytes, limit: int) -> list[Cycle]:
         elif current is not None:
             m = GOSSIP.search(line)
             if m:
-                current.home, current.listeners = m.groups()
+                exchange, current.home, current.listeners = m.groups()
+                current.healthy = exchange == "healthy"
             m = CONSENSUS.search(line)
             if m:
                 current.consensus = m.group(1) + "/10"
@@ -150,6 +152,20 @@ def current_dashboard(name: str, data: bytes) -> None:
     print(f"{name:<12} current={status:<18} cycles={len(active):2d}  consensus={latest.consensus:<5}  home={latest.home} listeners={latest.listeners}")
 
 
+def rendezvous_dashboard(name: str, data: bytes) -> bool:
+    """Measure observed rendezvous evidence independently of reset decisions."""
+    cycles = parse(data, 10_000)
+    qualified = [c for c in cycles if c.healthy and c.home != "-" and
+                 c.listeners.isdigit() and int(c.listeners) >= 6]
+    if not cycles:
+        print(f"{name:<12} rendezvous=none")
+        return False
+    latest = cycles[-1]
+    state = "QUALIFIED" if qualified and qualified[-1] is latest else "not-qualified"
+    print(f"{name:<12} rendezvous={state:<12} qualified={len(qualified):3d}  latest-home={latest.home}  latest-listeners={latest.listeners}  latest-exchange={'healthy' if latest.healthy else 'incomplete'}")
+    return state == "QUALIFIED"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--recent", type=int, default=10, help="complete cycles per board (default: 10)")
@@ -175,6 +191,9 @@ def main() -> int:
         print("Current attempts | cycles since latest TEST RESET EXECUTED")
         for name, data in datasets:
             current_dashboard(name, data)
+        print("Observed rendezvous | independent of TEST RESET decisions")
+        observed = [rendezvous_dashboard(name, data) for name, data in datasets]
+        print(f"GLOBAL        {'ALL SIX QUALIFIED' if all(observed) else 'not all six currently qualified'}")
     else:
         print(f"Rendezvous dashboard | last {args.recent} complete cycles | KPI = exchange-start → deep-sleep")
         for i in range(4):
