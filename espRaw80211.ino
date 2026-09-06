@@ -836,6 +836,10 @@ public:
         // beacon capture.  ESPNowMux otherwise defaults to channel 1.
         privMux.defaultChannel = wifiChannel;
 #endif
+        // Rendezvous reports are gossip: every nearby device must receive
+        // every report.  Do not let ESPNowMux lock the BRPT route to the
+        // first peer heard.
+        privMux.alwaysBroadcast = true;
         startOneShotCapture();
     }
 
