@@ -67,6 +67,19 @@ scout gaps must not make supporter sets oscillate.  Evidence used to move to a
 new beacon should be reasonably fresh; evidence should age out much more slowly
 when aging would force a move away from a stable home beacon.
 
+Persisted claims are relay knowledge, not votes. A rendezvous decision uses
+only claims directly observed or received during the current wake. Because
+membership is unknown, exchange completeness is judged from local transport
+health: the large majority of scheduled sends must succeed and valid peer
+reports must arrive. An incomplete exchange retains the current home and
+clears proposal progress. Packet loss therefore delays convergence rather
+than becoming evidence for a switch.
+
+Each stored claim also records the local wake when its origin generation last
+advanced. Hearing another relay repeat the same generation does not refresh
+that age. Old claims remain inspectable, but cease voting and cease being
+relayed after the bounded freshness window until the origin refreshes them.
+
 ## ESP-NOW gossip
 
 Reports are sent at 5 Hz while awake.  A report header should identify:
@@ -102,6 +115,13 @@ not corrupt, convergence.
 8. Proposals must remain stable for multiple rendezvous rounds before a home
    switch.  Moving away from a stable beacon uses stronger hysteresis than
    moving toward a demonstrated superset.
+9. Proposal rounds must be consecutive healthy exchange rounds. An incomplete
+   exchange cannot advance or preserve a partially completed proposal.
+10. Equal current-wake support from only one device is not consensus evidence
+    and cannot trigger a switch. Equal-support deterministic tie-breaking is
+    enabled only with multi-device current evidence corroborated by equivalent
+    retained supporter sets. A retained strict superset may corroborate a move
+    only when the current wake also contains multi-device support.
 
 No client declares discovery complete.  A newly learned client or claim can
 always reopen the decision.
@@ -167,4 +187,3 @@ directly visible BSSIDs, received senders, claim insert/update/drop decisions,
 supporter sets, candidate ranking, proposal age, switch reason, and sleep
 deadline.  Tests should assert stable outcomes rather than depend only on log
 inspection.
-

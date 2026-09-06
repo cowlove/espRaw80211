@@ -68,6 +68,12 @@ struct BeaconClaim {
     uint64_t bssid = 0;
     uint32_t originGeneration = 0;
     int8_t rssi = -127;
+    // Local wake when this origin advanced the claim. Repeated relays of the
+    // same origin generation do not keep stale evidence alive forever.
+    uint32_t learnedWakeGeneration = 0;
+    // Runtime-only: persisted claims remain relay knowledge, but only claims
+    // refreshed or received during this wake may vote in a decision.
+    uint32_t receivedWakeGeneration = 0;
 };
 
 struct RemoteBeaconStats {
@@ -206,6 +212,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr uint64_t reportPeriodUsec = 200000;
     static constexpr uint64_t defaultRendezvousUsec = 30ULL * 1000000ULL;
     static constexpr uint32_t scoutIntervalWakes = 2;
+    static constexpr uint32_t claimFreshnessWakes = 20;
     // Beacon acquisition and ESP-NOW exchange are separate phases. Keep a
     // generous acquisition window, and allow five seconds for gossip once a
     // usable beacon has been observed.
@@ -239,6 +246,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint16_t reportTxCount = 0;
     uint16_t reportRxCount = 0;
     uint16_t reportRxClaimCount = 0;
+    uint16_t reportValidRxCount = 0;
+    uint64_t reportSenders[16] = {};
+    uint8_t reportSenderCount = 0;
     uint32_t scanParseRejects = 0;
     uint32_t scanAccepted = 0;
     uint32_t targetHits = 0;
@@ -258,13 +268,21 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             unsigned long long bssid = 0;
             unsigned generation = 0;
             int rssi = -127;
+            unsigned learned = 0;
             int consumed = 0;
-            if (sscanf(encoded.c_str() + offset, "%llx,%llx,%x,%d;%n",
-                       &origin, &bssid, &generation, &rssi, &consumed) != 4 ||
-                consumed <= 0)
-                break;
+            int fields = sscanf(encoded.c_str() + offset,
+                "%llx,%llx,%x,%d,%x;%n", &origin, &bssid, &generation,
+                &rssi, &learned, &consumed);
+            if (fields != 5 || consumed <= 0) {
+                consumed = 0;
+                fields = sscanf(encoded.c_str() + offset,
+                    "%llx,%llx,%x,%d;%n", &origin, &bssid, &generation,
+                    &rssi, &consumed);
+                if (fields != 4 || consumed <= 0) break;
+            }
             claims[slot++] = {(uint64_t)origin, (uint64_t)bssid,
-                              (uint32_t)generation, (int8_t)rssi};
+                              (uint32_t)generation, (int8_t)rssi,
+                              (uint32_t)learned, 0};
             offset += (size_t)consumed;
         }
     }
@@ -274,10 +292,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         char record[64];
         for (const BeaconClaim &claim : claims) {
             if (claim.originMac == 0) continue;
-            snprintf(record, sizeof(record), "%llx,%llx,%x,%d;",
+            snprintf(record, sizeof(record), "%llx,%llx,%x,%d,%x;",
                      (unsigned long long)claim.originMac,
                      (unsigned long long)claim.bssid,
-                     claim.originGeneration, (int)claim.rssi);
+                     claim.originGeneration, (int)claim.rssi,
+                     claim.learnedWakeGeneration);
             encoded += record;
         }
         spiffsClaims = encoded;
@@ -374,8 +393,40 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         return count;
     }
 
+    bool claimMayVote(const BeaconClaim &claim) const {
+        return claim.originMac != 0 &&
+            claim.learnedWakeGeneration != 0 &&
+            claim.receivedWakeGeneration == wakeGeneration &&
+            wakeGeneration - claim.learnedWakeGeneration <=
+                claimFreshnessWakes;
+    }
+
+    size_t currentSupporterCount(uint64_t bssid) const {
+        size_t count = 0;
+        for (const BeaconClaim &claim : claims)
+            if (claimMayVote(claim) && claim.bssid == bssid) count++;
+        return count;
+    }
+
     bool supportersInclude(uint64_t supersetBssid,
                            uint64_t subsetBssid) const {
+        for (const BeaconClaim &subset : claims) {
+            if (!claimMayVote(subset) || subset.bssid != subsetBssid) continue;
+            bool found = false;
+            for (const BeaconClaim &candidate : claims)
+                if (claimMayVote(candidate) &&
+                    candidate.originMac == subset.originMac &&
+                    candidate.bssid == supersetBssid) {
+                    found = true;
+                    break;
+                }
+            if (!found) return false;
+        }
+        return true;
+    }
+
+    bool retainedSupportersInclude(uint64_t supersetBssid,
+                                   uint64_t subsetBssid) const {
         for (const BeaconClaim &subset : claims) {
             if (subset.originMac == 0 || subset.bssid != subsetBssid) continue;
             bool found = false;
@@ -392,12 +443,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 
     uint64_t reportOnlyCandidate(uint64_t homeBssid) const {
         uint64_t best = homeBssid;
-        size_t bestSupport = supporterCount(homeBssid);
+        size_t bestSupport = currentSupporterCount(homeBssid);
+        size_t bestRetainedSupport = supporterCount(homeBssid);
         for (const BeaconInfo &visible : packetLog) {
             if (visible.ssid == 0 || visible.rssi < reportMinRssi ||
                 visible.count < minimumCandidatePackets)
                 continue;
-            const size_t support = supporterCount(visible.ssid);
+            const size_t support = currentSupporterCount(visible.ssid);
+            const size_t retainedSupport = supporterCount(visible.ssid);
             if (!supportersInclude(visible.ssid, homeBssid) ||
                 support < bestSupport)
                 continue;
@@ -406,10 +459,22 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             // candidate with more peer support. When support is equal, use a
             // deterministic BSSID ordering so devices do not split because
             // their local packet counts differ.
-            if (best == homeBssid || support > bestSupport ||
-                (support == bestSupport && visible.ssid < best)) {
+            const bool strongerCurrentSet = support > bestSupport;
+            const bool corroboratedRetainedSuperset = support >= 2 &&
+                support == bestSupport &&
+                retainedSupport > bestRetainedSupport &&
+                retainedSupportersInclude(visible.ssid, best);
+            const bool corroboratedEquivalentSets = support >= 2 &&
+                support == bestSupport &&
+                retainedSupport == bestRetainedSupport &&
+                retainedSupportersInclude(visible.ssid, best) &&
+                retainedSupportersInclude(best, visible.ssid) &&
+                visible.ssid < best;
+            if (strongerCurrentSet || corroboratedRetainedSuperset ||
+                corroboratedEquivalentSets) {
                 best = visible.ssid;
                 bestSupport = support;
+                bestRetainedSupport = retainedSupport;
             }
         }
         return best;
@@ -468,14 +533,18 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             BeaconClaim &claim = claims[i];
             if (claim.originMac == originMac && claim.bssid == bssid) {
                 if (originGeneration < claim.originGeneration) return;
+                if (originGeneration > claim.originGeneration)
+                    claim.learnedWakeGeneration = wakeGeneration;
                 claim.originGeneration = originGeneration;
                 claim.rssi = rssi;
+                claim.receivedWakeGeneration = wakeGeneration;
                 return;
             }
             if (empty == claimTableSize && claim.originMac == 0) empty = i;
         }
         if (empty == claimTableSize) return;
-        claims[empty] = {originMac, bssid, originGeneration, rssi};
+        claims[empty] = {originMac, bssid, originGeneration, rssi,
+                         wakeGeneration, wakeGeneration};
     }
 
     void onBroadScan(const WifiBeaconPacket &packet) {
@@ -519,6 +588,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         if (sender == 0 && from != nullptr)
             for (int i = 0; i < 6; ++i) sender = (sender << 8) | from[i];
         if (sender == deviceMac) return;
+        reportValidRxCount++;
+        bool knownSender = false;
+        for (uint8_t i = 0; i < reportSenderCount; ++i)
+            if (reportSenders[i] == sender) knownSender = true;
+        if (!knownSender && reportSenderCount <
+            sizeof(reportSenders) / sizeof(reportSenders[0]))
+            reportSenders[reportSenderCount++] = sender;
         for (size_t i = 0; i < count; ++i) {
             BeaconClaimEntry entry;
             memcpy(&entry, data + sizeof(header) +
@@ -570,7 +646,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             const size_t i = claimTransmitCursor++ % claimTableSize;
             visited++;
             const BeaconClaim &claim = claims[i];
-            if (claim.originMac == 0 || claim.rssi < reportMinRssi) continue;
+            if (claim.originMac == 0 || claim.rssi < reportMinRssi ||
+                claim.learnedWakeGeneration == 0 ||
+                wakeGeneration - claim.learnedWakeGeneration >
+                    claimFreshnessWakes)
+                continue;
             BeaconClaimEntry entry = {claim.originMac, claim.bssid,
                                       claim.originGeneration, claim.rssi};
             memcpy(buffer + sizeof(header) + count * sizeof(entry),
@@ -582,6 +662,16 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         privMux.send("BRPT", buffer, sizeof(header) +
                      count * sizeof(BeaconClaimEntry));
         reportTxCount++;
+    }
+
+    bool exchangeHealthy() const {
+        // Membership is unknown, so completeness cannot mean hearing every
+        // client. Use only locally observable transport health.
+        const uint32_t successes = privMux.getSendSuccesses();
+        const uint32_t failures = privMux.getSendFailures();
+        const bool txHealthy = reportTxCount >= 20 && successes >= 20 &&
+            failures <= 5;
+        return txHealthy && reportValidRxCount >= 3 && reportSenderCount > 0;
     }
 
     void configureBeaconRadio() {
@@ -664,6 +754,9 @@ public:
         reportTxCount = 0;
         reportRxCount = 0;
         reportRxClaimCount = 0;
+        reportValidRxCount = 0;
+        memset(reportSenders, 0, sizeof(reportSenders));
+        reportSenderCount = 0;
         scanParseRejects = 0;
         scanAccepted = 0;
         targetHits = 0;
@@ -838,18 +931,32 @@ public:
         uint64_t sleepUsec =
             (timeToGoal - awakeSincePacket) * spiffsScale;
         const uint64_t homeBssid = spiffsBeacon.read();
-        const uint64_t candidateBssid = reportOnlyCandidate(homeBssid);
-        const bool switched = advanceProposal(homeBssid, candidateBssid);
-        out("gossip %s claims %d home %012llx supporters %d proposal %012llx supporters %d age %d espnow tx %u ok %u fail %u busy %u rx %u claims %u scan accepted %u target %u parse-reject %u%s",
+        const bool healthyExchange = exchangeHealthy();
+        const uint64_t candidateBssid = healthyExchange ?
+            reportOnlyCandidate(homeBssid) : homeBssid;
+        bool switched = false;
+        if (healthyExchange)
+            switched = advanceProposal(homeBssid, candidateBssid);
+        else {
+            // Proposal rounds must be consecutive and healthy. Treat packet
+            // loss as delayed convergence, never as evidence to move.
+            spiffsProposalBeacon = 0;
+            spiffsProposalAge = 0;
+        }
+        out("gossip %s exchange %s claims %d home %012llx supporters current %d retained %d proposal %012llx supporters current %d retained %d age %d espnow tx %u ok %u fail %u busy %u rx %u valid %u peers %u claims %u scan accepted %u target %u parse-reject %u%s",
             scoutRendezvousWake ? "scout-rendezvous" :
             (scoutWake ? "scout-acquire" : "home"),
+            healthyExchange ? "healthy" : "incomplete",
             (int)claimCount(), (unsigned long long)homeBssid,
+            (int)currentSupporterCount(homeBssid),
             (int)supporterCount(homeBssid),
             (unsigned long long)candidateBssid,
+            (int)currentSupporterCount(candidateBssid),
             (int)supporterCount(candidateBssid), spiffsProposalAge.read(),
             reportTxCount, privMux.getSendSuccesses(),
             privMux.getSendFailures(), privMux.getSendBusyDrops(),
-            reportRxCount, reportRxClaimCount, scanAccepted, targetHits,
+            reportRxCount, reportValidRxCount, reportSenderCount,
+            reportRxClaimCount, scanAccepted, targetHits,
             scanParseRejects,
             switched ? " SWITCH" : "");
         dumpDeviceBeaconMatrix();
