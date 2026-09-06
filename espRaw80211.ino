@@ -596,18 +596,20 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         if (sender == 0 && from != nullptr)
             for (int i = 0; i < 6; ++i) sender = (sender << 8) | from[i];
         int peerSlot = -1;
-        for (uint8_t i = 0; i < reportSenderCount; ++i)
-            if (reportSenders[i] == sender) peerSlot = i;
-        if (peerSlot < 0 && sender != 0 && reportSenderCount <
-            sizeof(reportSenders) / sizeof(reportSenders[0])) {
-            peerSlot = reportSenderCount;
-            reportSenders[peerSlot] = sender;
-            reportSenderFirstUsec[peerSlot] = micros();
-            reportSenderCount++;
-        }
-        if (peerSlot >= 0) {
-            reportSenderRaw[peerSlot]++;
-            reportSenderLastUsec[peerSlot] = micros();
+        if (sender != 0 && sender != deviceMac) {
+            for (uint8_t i = 0; i < reportSenderCount; ++i)
+                if (reportSenders[i] == sender) peerSlot = i;
+            if (peerSlot < 0 && reportSenderCount <
+                sizeof(reportSenders) / sizeof(reportSenders[0])) {
+                peerSlot = reportSenderCount;
+                reportSenders[peerSlot] = sender;
+                reportSenderFirstUsec[peerSlot] = micros();
+                reportSenderCount++;
+            }
+            if (peerSlot >= 0) {
+                reportSenderRaw[peerSlot]++;
+                reportSenderLastUsec[peerSlot] = micros();
+            }
         }
         if (length < (int)sizeof(BeaconReportHeader)) return;
         BeaconReportHeader header;
