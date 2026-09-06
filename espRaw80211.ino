@@ -68,7 +68,7 @@ struct __attribute__((packed)) BeaconAssociationEntry {
     uint64_t originMac;
     uint64_t selectedBeacon;
     uint32_t originGeneration;
-    uint16_t ageSeconds;
+    uint16_t ageCycles;
 };
 
 static_assert(sizeof(BeaconReportHeader) +
@@ -93,7 +93,7 @@ struct BeaconAssociation {
     uint64_t originMac = 0;
     uint64_t selectedBeacon = 0;
     uint32_t originGeneration = 0;
-    uint32_t ageSeconds = 0;
+    uint32_t ageCycles = 0;
     uint64_t storedAtUsec = 0;
 };
 
@@ -237,11 +237,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr uint32_t scoutIntervalWakes = 2;
     static constexpr uint32_t claimFreshnessWakes = 20;
     // Long-run test setting: retain association evidence across this many
-    // rendezvous periods. The age comparison below is in seconds, so derive
-    // the effective limit from the nominal 30-second rendezvous period.
+    // rendezvous periods. Association records are aged by wake, not wall time.
     static constexpr uint32_t associationFreshnessCycles = 20;
-    static constexpr uint32_t associationFreshnessSeconds =
-        (defaultRendezvousUsec / 1000000ULL) * associationFreshnessCycles;
     // Temporary long-run bootstrap test hook. Each device independently
     // commits to a reset after ten consecutive healthy cycles in which six
     // fresh associations select its home beacon. It then waits three more
@@ -422,22 +419,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         spiffsClaims = encoded;
     }
 
-    uint32_t associationAgeSeconds(const BeaconAssociation &association) const {
-        uint64_t elapsed = 0;
-        const uint64_t now = micros();
-        if (association.storedAtUsec != 0 && now >= association.storedAtUsec)
-            elapsed = (now - association.storedAtUsec) / 1000000ULL;
-        const uint64_t age = (uint64_t)association.ageSeconds + elapsed;
-        return age > UINT32_MAX ? UINT32_MAX : (uint32_t)age;
+    uint32_t associationAgeCycles(const BeaconAssociation &association) const {
+        return association.ageCycles;
     }
 
     void loadAssociations() {
         memset(associations, 0, sizeof(associations));
         const string encoded = spiffsAssociations.read();
-        const uint64_t sleptSeconds64 =
-            spiffsSleepTime.read() / (uint64_t)1000000;
-        const uint32_t sleptSeconds = sleptSeconds64 > UINT32_MAX ?
-            UINT32_MAX : (uint32_t)sleptSeconds64;
         size_t offset = 0;
         size_t slot = 0;
         while (offset < encoded.size() && slot < associationTableSize) {
@@ -450,7 +438,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 "%llx,%llx,%x,%x;%n", &origin, &selected, &generation,
                 &age, &consumed);
             if (fields != 4 || consumed <= 0) break;
-            const uint64_t aged = (uint64_t)age + sleptSeconds;
+            // One persisted record spans one completed sleep/wake boundary.
+            const uint64_t aged = (uint64_t)age + 1;
             associations[slot++] = {
                 (uint64_t)origin, (uint64_t)selected,
                 (uint32_t)generation,
@@ -469,14 +458,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                      (unsigned long long)association.originMac,
                      (unsigned long long)association.selectedBeacon,
                      association.originGeneration,
-                     associationAgeSeconds(association));
+                     associationAgeCycles(association));
             encoded += record;
         }
         spiffsAssociations = encoded;
     }
 
     void mergeAssociation(uint64_t originMac, uint64_t selectedBeacon,
-                          uint32_t originGeneration, uint32_t ageSeconds,
+                          uint32_t originGeneration, uint32_t ageCycles,
                           bool direct = false) {
         if (originMac == 0 || selectedBeacon == 0) return;
         size_t empty = associationTableSize;
@@ -484,12 +473,12 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             BeaconAssociation &association = associations[i];
             if (association.originMac == originMac) {
                 if (originGeneration < association.originGeneration) return;
-                const uint32_t currentAge = associationAgeSeconds(association);
+                const uint32_t currentAge = associationAgeCycles(association);
                 if (originGeneration == association.originGeneration &&
-                    !direct && ageSeconds >= currentAge)
+                    !direct && ageCycles >= currentAge)
                     return;
                 association = {originMac, selectedBeacon, originGeneration,
-                               direct ? 0U : ageSeconds, micros()};
+                               direct ? 0U : min(ageCycles + 1U, UINT32_MAX), micros()};
                 return;
             }
             if (empty == associationTableSize && association.originMac == 0)
@@ -497,7 +486,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         }
         if (empty == associationTableSize) return;
         associations[empty] = {originMac, selectedBeacon, originGeneration,
-                               direct ? 0U : ageSeconds, micros()};
+                               direct ? 0U : min(ageCycles + 1U, UINT32_MAX), micros()};
     }
 
     size_t listenerCount(uint64_t bssid) const {
@@ -505,8 +494,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         for (const BeaconAssociation &association : associations)
             if (association.originMac != 0 &&
                 association.selectedBeacon == bssid &&
-                associationAgeSeconds(association) <=
-                    associationFreshnessSeconds)
+                associationAgeCycles(association) <= associationFreshnessCycles)
                 count++;
         return count;
     }
@@ -565,12 +553,12 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         }
         for (const BeaconAssociation &association : associations) {
             if (association.originMac == 0) continue;
-            const uint32_t age = associationAgeSeconds(association);
-            out("matrix association device %012llx selected %012llx gen %u age %us %s",
+            const uint32_t age = associationAgeCycles(association);
+            out("matrix association device %012llx selected %012llx gen %u age %uwakes %s",
                 (unsigned long long)association.originMac,
                 (unsigned long long)association.selectedBeacon,
                 association.originGeneration, age,
-                age <= associationFreshnessSeconds ? "fresh" : "expired");
+                age <= associationFreshnessCycles ? "fresh" : "expired");
         }
         for (const BeaconInfo &info : packetLog) {
             if (info.ssid == 0) continue;
@@ -901,7 +889,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             memcpy(&entry, data + associationOffset +
                    i * sizeof(entry), sizeof(entry));
             mergeAssociation(entry.originMac, entry.selectedBeacon,
-                             entry.originGeneration, entry.ageSeconds);
+                             entry.originGeneration, entry.ageCycles);
         }
     }
 
@@ -986,8 +974,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             associationVisited++;
             const BeaconAssociation &association = associations[i];
             if (association.originMac == 0) continue;
-            const uint32_t age = associationAgeSeconds(association);
-            if (age > associationFreshnessSeconds) continue;
+            const uint32_t age = associationAgeCycles(association);
+            if (age > associationFreshnessCycles) continue;
             BeaconAssociationEntry entry = {
                 association.originMac, association.selectedBeacon,
                 association.originGeneration,
