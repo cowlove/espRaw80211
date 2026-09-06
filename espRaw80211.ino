@@ -823,6 +823,11 @@ public:
         // Configure before ESPNowMux initializes, matching the existing
         // hardware radio ordering used by beacon capture.
         configureBeaconRadio();
+#ifndef CSIM
+        // Keep ESP-NOW peer setup on the same fixed channel as promiscuous
+        // beacon capture.  ESPNowMux otherwise defaults to channel 1.
+        privMux.defaultChannel = wifiChannel;
+#endif
         startOneShotCapture();
     }
 
@@ -943,7 +948,7 @@ public:
             spiffsProposalBeacon = 0;
             spiffsProposalAge = 0;
         }
-        out("gossip %s exchange %s claims %d home %012llx supporters current %d retained %d proposal %012llx supporters current %d retained %d age %d espnow tx %u ok %u fail %u busy %u rx %u valid %u peers %u claims %u scan accepted %u target %u parse-reject %u%s",
+        out("gossip %s exchange %s claims %d home %012llx supporters current %d retained %d proposal %012llx supporters current %d retained %d age %d espnow tx %u ok %u fail %u busy %u rawrx %u rx %u valid %u peers %u claims %u scan accepted %u target %u parse-reject %u channel %d exchange-usec %llu-%llu last-rx %012llx%s",
             scoutRendezvousWake ? "scout-rendezvous" :
             (scoutWake ? "scout-acquire" : "home"),
             healthyExchange ? "healthy" : "incomplete",
@@ -955,9 +960,14 @@ public:
             (int)supporterCount(candidateBssid), spiffsProposalAge.read(),
             reportTxCount, privMux.getSendSuccesses(),
             privMux.getSendFailures(), privMux.getSendBusyDrops(),
+            privMux.getReceiveCallbacks(),
             reportRxCount, reportValidRxCount, reportSenderCount,
             reportRxClaimCount, scanAccepted, targetHits,
             scanParseRejects,
+            wifiChannel,
+            (unsigned long long)espNowStartUsec,
+            (unsigned long long)espNowEndUsec,
+            (unsigned long long)privMux.getLastReceiveMac(),
             switched ? " SWITCH" : "");
         dumpDeviceBeaconMatrix();
         out("deep sleep %.1f sec, goal %.1f scale %f", sleepUsec / 1000000.0,
