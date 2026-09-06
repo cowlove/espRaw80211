@@ -236,7 +236,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr uint64_t defaultRendezvousUsec = 30ULL * 1000000ULL;
     static constexpr uint32_t scoutIntervalWakes = 2;
     static constexpr uint32_t claimFreshnessWakes = 20;
-    static constexpr uint32_t associationFreshnessSeconds = 150;
+    // Long-run test setting: retain association evidence across several
+    // rendezvous gaps. The production freshness policy can be tightened later.
+    static constexpr uint32_t associationFreshnessSeconds = 600;
     // Temporary long-run bootstrap test hook. Each device independently
     // commits to a reset after ten consecutive healthy cycles in which six
     // fresh associations select its home beacon. It then waits three more
@@ -244,6 +246,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr size_t testClusterSize = 6;
     static constexpr int testConsensusCyclesToCommit = 10;
     static constexpr int testResetDelayCycles = 3;
+    static constexpr int testConsensusMissesToReset = 3;
     // Beacon acquisition and ESP-NOW exchange are separate phases. Keep a
     // generous acquisition window, and allow five seconds for gossip once a
     // usable beacon has been observed.
@@ -264,6 +267,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     SPIFFSVariable<uint64_t> spiffsProposalBeacon{"/proposal", 0};
     SPIFFSVariable<int> spiffsProposalAge{"/proposalAge", 0};
     SPIFFSVariable<int> spiffsTestConsensusCycles{"/testConsensus", 0};
+    SPIFFSVariable<int> spiffsTestConsensusMisses{"/testMisses", 0};
     SPIFFSVariable<int> spiffsTestResetCommitted{"/testResetCommit", 0};
     SPIFFSVariable<int> spiffsTestResetDelayCycles{"/testResetDelay", 0};
     uint64_t targetBeacon = 0;
@@ -311,6 +315,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         spiffsProposalBeacon = (uint64_t)0;
         spiffsProposalAge = 0;
         spiffsTestConsensusCycles = 0;
+        spiffsTestConsensusMisses = 0;
         spiffsTestResetCommitted = 0;
         spiffsTestResetDelayCycles = 0;
         memset(claims, 0, sizeof(claims));
@@ -335,16 +340,26 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         if (!healthyExchange || homeBssid == 0 ||
             listeners < testClusterSize) {
             const int priorCycles = spiffsTestConsensusCycles.read();
-            if (priorCycles != 0) {
-                out("test consensus lost; counter reset from %d/%d",
-                    priorCycles, testConsensusCyclesToCommit);
-                // Avoid an unnecessary flash write on every ordinary
-                // non-consensus wake while the counter is already zero.
+            const int misses = spiffsTestConsensusMisses.read() + 1;
+            spiffsTestConsensusMisses = misses;
+            if (misses < testConsensusMissesToReset) {
+                out("test consensus miss %d/%d; preserving streak %d/%d (healthy %s listeners %d)",
+                    misses, testConsensusMissesToReset, priorCycles,
+                    testConsensusCyclesToCommit, healthyExchange ? "yes" : "no",
+                    (int)listeners);
+                return;
+            }
+            if (priorCycles != 0 || misses >= testConsensusMissesToReset) {
+                out("test consensus lost after %d misses; counter reset from %d/%d",
+                    misses, priorCycles, testConsensusCyclesToCommit);
                 spiffsTestConsensusCycles = 0;
             }
             return;
         }
 
+        if (spiffsTestConsensusMisses.read() != 0)
+            out("test consensus miss streak cleared after healthy cycle");
+        spiffsTestConsensusMisses = 0;
         const int cycles = spiffsTestConsensusCycles.read() + 1;
         spiffsTestConsensusCycles = cycles;
         out("test consensus %d/%d on %012llx listeners %d", cycles,
