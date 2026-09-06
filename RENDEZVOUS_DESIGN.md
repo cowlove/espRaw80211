@@ -80,6 +80,23 @@ advanced. Hearing another relay repeat the same generation does not refresh
 that age. Old claims remain inspectable, but cease voting and cease being
 relayed after the bounded freshness window until the origin refreshes them.
 
+Beacon visibility and current association are separate facts. Visibility is a
+many-to-many `(origin, BSSID)` relation and may remain true after a client
+moves. Current association is a single last-writer-wins record per origin:
+`(origin, selected BSSID, origin generation, age)`. A newer origin generation
+immediately replaces the older selected BSSID. Relays preserve the origin and
+generation and increase, rather than reset, the elapsed age. Only a report
+received directly from the origin has age zero. Expired associations do not
+count as current listeners, while their independently aged visibility claims
+may remain useful.
+
+Association age is measured in elapsed seconds so correctness does not depend
+on every client using the same wake period. The singleton fast path compares
+fresh association records: one listener on the current home and at least two
+listeners on a directly visible, locally usable candidate permits an immediate
+move. Visibility supporter sets continue to establish whether that move is
+physically possible; they no longer masquerade as current listener counts.
+
 ## ESP-NOW gossip
 
 Reports are sent at 5 Hz while awake.  A report header should identify:
