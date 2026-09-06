@@ -236,9 +236,12 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr uint64_t defaultRendezvousUsec = 30ULL * 1000000ULL;
     static constexpr uint32_t scoutIntervalWakes = 2;
     static constexpr uint32_t claimFreshnessWakes = 20;
-    // Long-run test setting: retain association evidence across several
-    // rendezvous gaps. The production freshness policy can be tightened later.
-    static constexpr uint32_t associationFreshnessSeconds = 600;
+    // Long-run test setting: retain association evidence across this many
+    // rendezvous periods. The age comparison below is in seconds, so derive
+    // the effective limit from the nominal 30-second rendezvous period.
+    static constexpr uint32_t associationFreshnessCycles = 20;
+    static constexpr uint32_t associationFreshnessSeconds =
+        (defaultRendezvousUsec / 1000000ULL) * associationFreshnessCycles;
     // Temporary long-run bootstrap test hook. Each device independently
     // commits to a reset after ten consecutive healthy cycles in which six
     // fresh associations select its home beacon. It then waits three more
