@@ -248,6 +248,10 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint16_t reportRxClaimCount = 0;
     uint16_t reportValidRxCount = 0;
     uint64_t reportSenders[16] = {};
+    uint16_t reportSenderRaw[16] = {};
+    uint16_t reportSenderValid[16] = {};
+    uint64_t reportSenderFirstUsec[16] = {};
+    uint64_t reportSenderLastUsec[16] = {};
     uint8_t reportSenderCount = 0;
     uint32_t scanParseRejects = 0;
     uint32_t scanAccepted = 0;
@@ -583,6 +587,28 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 
     void onReport(const uint8_t *from, const uint8_t *data, int length) {
         reportRxCount++;
+        uint64_t sender = 0;
+        if (length >= (int)sizeof(BeaconReportHeader)) {
+            BeaconReportHeader peek;
+            memcpy(&peek, data, sizeof(peek));
+            sender = peek.senderMac;
+        }
+        if (sender == 0 && from != nullptr)
+            for (int i = 0; i < 6; ++i) sender = (sender << 8) | from[i];
+        int peerSlot = -1;
+        for (uint8_t i = 0; i < reportSenderCount; ++i)
+            if (reportSenders[i] == sender) peerSlot = i;
+        if (peerSlot < 0 && sender != 0 && reportSenderCount <
+            sizeof(reportSenders) / sizeof(reportSenders[0])) {
+            peerSlot = reportSenderCount;
+            reportSenders[peerSlot] = sender;
+            reportSenderFirstUsec[peerSlot] = micros();
+            reportSenderCount++;
+        }
+        if (peerSlot >= 0) {
+            reportSenderRaw[peerSlot]++;
+            reportSenderLastUsec[peerSlot] = micros();
+        }
         if (length < (int)sizeof(BeaconReportHeader)) return;
         BeaconReportHeader header;
         memcpy(&header, data, sizeof(header));
@@ -592,11 +618,12 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         const size_t count = min((size_t)header.claimCount,
                                  min(available, reportMaxClaims));
         reportRxClaimCount += count;
-        uint64_t sender = header.senderMac;
+        sender = header.senderMac;
         if (sender == 0 && from != nullptr)
             for (int i = 0; i < 6; ++i) sender = (sender << 8) | from[i];
         if (sender == deviceMac) return;
         reportValidRxCount++;
+        if (peerSlot >= 0) reportSenderValid[peerSlot]++;
         bool knownSender = false;
         for (uint8_t i = 0; i < reportSenderCount; ++i)
             if (reportSenders[i] == sender) knownSender = true;
@@ -636,6 +663,45 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                         sender;
                 }
             }
+        }
+    }
+
+    void dumpExchangePeers() const {
+        size_t knownPeers = 0;
+        for (const BeaconClaim &claim : claims) {
+            if (claim.originMac == 0 || claim.originMac == deviceMac) continue;
+            bool duplicate = false;
+            for (const BeaconClaim &prior : claims)
+                if (&prior < &claim && prior.originMac == claim.originMac)
+                    duplicate = true;
+            if (!duplicate) knownPeers++;
+        }
+        size_t heardPeers = 0;
+        for (uint8_t i = 0; i < reportSenderCount; ++i)
+            if (reportSenders[i] != deviceMac && reportSenderValid[i] != 0)
+                heardPeers++;
+        out("espnow heard %u/%u known peers", (unsigned)heardPeers,
+            (unsigned)knownPeers);
+        for (uint8_t i = 0; i < reportSenderCount; ++i)
+            out("espnow peer %012llx raw %u valid %u first %llu last %llu",
+                (unsigned long long)reportSenders[i], reportSenderRaw[i],
+                reportSenderValid[i],
+                (unsigned long long)reportSenderFirstUsec[i],
+                (unsigned long long)reportSenderLastUsec[i]);
+        for (const BeaconClaim &claim : claims) {
+            if (claim.originMac == 0 || claim.originMac == deviceMac) continue;
+            bool duplicate = false;
+            for (const BeaconClaim &prior : claims)
+                if (&prior < &claim && prior.originMac == claim.originMac)
+                    duplicate = true;
+            if (duplicate) continue;
+            bool heard = false;
+            for (uint8_t i = 0; i < reportSenderCount; ++i)
+                if (reportSenders[i] == claim.originMac &&
+                    reportSenderValid[i] != 0) heard = true;
+            if (!heard)
+                out("espnow missing peer %012llx",
+                    (unsigned long long)claim.originMac);
         }
     }
 
@@ -764,6 +830,10 @@ public:
         reportRxClaimCount = 0;
         reportValidRxCount = 0;
         memset(reportSenders, 0, sizeof(reportSenders));
+        memset(reportSenderRaw, 0, sizeof(reportSenderRaw));
+        memset(reportSenderValid, 0, sizeof(reportSenderValid));
+        memset(reportSenderFirstUsec, 0, sizeof(reportSenderFirstUsec));
+        memset(reportSenderLastUsec, 0, sizeof(reportSenderLastUsec));
         reportSenderCount = 0;
         scanParseRejects = 0;
         scanAccepted = 0;
@@ -981,6 +1051,7 @@ public:
             (unsigned long long)espNowEndUsec,
             (unsigned long long)privMux.getLastReceiveMac(),
             switched ? " SWITCH" : "");
+        dumpExchangePeers();
         dumpDeviceBeaconMatrix();
         out("deep sleep %.1f sec, goal %.1f scale %f", sleepUsec / 1000000.0,
             goal / 1000000.0, spiffsScale.read());
