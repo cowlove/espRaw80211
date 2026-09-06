@@ -237,6 +237,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr uint32_t scoutIntervalWakes = 2;
     static constexpr uint32_t claimFreshnessWakes = 20;
     static constexpr uint32_t associationFreshnessSeconds = 150;
+    // Temporary long-run bootstrap test hook. Each device independently
+    // commits to a reset after ten consecutive healthy cycles in which six
+    // fresh associations select its home beacon. It then waits three more
+    // completed wake cycles before resetting, even if consensus is lost.
+    static constexpr size_t testClusterSize = 6;
+    static constexpr int testConsensusCyclesToCommit = 10;
+    static constexpr int testResetDelayCycles = 3;
     // Beacon acquisition and ESP-NOW exchange are separate phases. Keep a
     // generous acquisition window, and allow five seconds for gossip once a
     // usable beacon has been observed.
@@ -256,6 +263,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     SPIFFSVariable<uint64_t> spiffsScoutBeacon{"/scoutBeacon", 0};
     SPIFFSVariable<uint64_t> spiffsProposalBeacon{"/proposal", 0};
     SPIFFSVariable<int> spiffsProposalAge{"/proposalAge", 0};
+    SPIFFSVariable<int> spiffsTestConsensusCycles{"/testConsensus", 0};
+    SPIFFSVariable<int> spiffsTestResetCommitted{"/testResetCommit", 0};
+    SPIFFSVariable<int> spiffsTestResetDelayCycles{"/testResetDelay", 0};
     uint64_t targetBeacon = 0;
     int wifiChannel = 4;
     uint64_t startUsec = 0;
@@ -288,6 +298,67 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     bool scoutRendezvousWake = false;
     bool espNowStarted = false;
     uint64_t beaconReceivedAtUsec = 0;
+
+    void executeTestReset(uint64_t homeBssid) {
+        out("TEST RESET EXECUTED on %012llx",
+            (unsigned long long)homeBssid);
+        spiffsBeacon = (uint64_t)0;
+        spiffsClaims = string("");
+        spiffsAssociations = string("");
+        spiffsClaimGeneration = (uint32_t)0;
+        spiffsScoutPhase = 0;
+        spiffsScoutBeacon = (uint64_t)0;
+        spiffsProposalBeacon = (uint64_t)0;
+        spiffsProposalAge = 0;
+        spiffsTestConsensusCycles = 0;
+        spiffsTestResetCommitted = 0;
+        spiffsTestResetDelayCycles = 0;
+        memset(claims, 0, sizeof(claims));
+        memset(associations, 0, sizeof(associations));
+    }
+
+    void maybeResetAfterStableReunion(uint64_t homeBssid,
+                                      bool healthyExchange) {
+        if (spiffsTestResetCommitted.read()) {
+            const int delayCycles = spiffsTestResetDelayCycles.read() + 1;
+            spiffsTestResetDelayCycles = delayCycles;
+            out("TEST RESET delay %d/%d%s", delayCycles,
+                testResetDelayCycles,
+                delayCycles >= testResetDelayCycles ? " complete" : "");
+            if (delayCycles >= testResetDelayCycles)
+                executeTestReset(homeBssid);
+            return;
+        }
+
+        const size_t listeners = homeBssid == 0 ? 0 :
+            listenerCount(homeBssid);
+        if (!healthyExchange || homeBssid == 0 ||
+            listeners < testClusterSize) {
+            const int priorCycles = spiffsTestConsensusCycles.read();
+            if (priorCycles != 0) {
+                out("test consensus lost; counter reset from %d/%d",
+                    priorCycles, testConsensusCyclesToCommit);
+                // Avoid an unnecessary flash write on every ordinary
+                // non-consensus wake while the counter is already zero.
+                spiffsTestConsensusCycles = 0;
+            }
+            return;
+        }
+
+        const int cycles = spiffsTestConsensusCycles.read() + 1;
+        spiffsTestConsensusCycles = cycles;
+        out("test consensus %d/%d on %012llx listeners %d", cycles,
+            testConsensusCyclesToCommit, (unsigned long long)homeBssid,
+            (int)listeners);
+        if (cycles < testConsensusCyclesToCommit) return;
+
+        // This persisted commit is intentionally irreversible. Subsequent
+        // exchange or association loss cannot cancel the delayed reset.
+        spiffsTestResetCommitted = 1;
+        spiffsTestResetDelayCycles = 0;
+        out("TEST RESET COMMITTED on %012llx; execute after %d wake cycles",
+            (unsigned long long)homeBssid, testResetDelayCycles);
+    }
 
     void loadClaims() {
         memset(claims, 0, sizeof(claims));
@@ -1247,6 +1318,7 @@ public:
         // once before sleeping. Periodic reports alone can otherwise miss a
         // one-shot capture followed immediately by deep sleep.
         publishReport();
+        maybeResetAfterStableReunion(homeBssid, healthyExchange);
         saveClaims();
         saveAssociations();
         beaconCapture.stop();
