@@ -1,1 +1,7 @@
 *.out
+build/
+csim-fs/
+csim_context_sleep.txt
+csim_rtc.bin
+espRaw80211_csim
+__pycache__/
