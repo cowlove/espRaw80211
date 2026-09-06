@@ -505,7 +505,15 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             spiffsProposalBeacon = candidateBssid;
             spiffsProposalAge = 1;
         }
-        if (spiffsProposalAge.read() < 2) return false;
+        // A lonely device joining an established pool is not the symmetric
+        // pool-to-pool case that needs hysteresis.  Once this wake's healthy
+        // exchange shows at least one other fresh supporter for a directly
+        // visible candidate, move immediately toward that pool.  Equal or
+        // closely matched pools still require two consecutive rounds.
+        const bool singletonJoiningPool =
+            currentSupporterCount(homeBssid) == 1 &&
+            currentSupporterCount(candidateBssid) >= 2;
+        if (spiffsProposalAge.read() < 2 && !singletonJoiningPool) return false;
 
         // The candidate is directly visible in this wake and has already
         // passed the strict-supporter-superset test. Commit while aligned to
