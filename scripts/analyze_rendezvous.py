@@ -129,6 +129,27 @@ def convergence_dashboard(name: str, data: bytes) -> tuple[list[int], list[float
     return episodes, active_seconds
 
 
+def current_dashboard(name: str, data: bytes) -> None:
+    """Show the currently active reset-to-consensus attempt, if any."""
+    cycles = parse(data, 10_000)
+    resets = [i for i, c in enumerate(cycles) if c.reset == "EXECUTED"]
+    if not resets:
+        print(f"{name:<12} current=none")
+        return
+    start = resets[-1]
+    active = cycles[start + 1:]
+    if not active:
+        print(f"{name:<12} current=started  cycles=0")
+        return
+    latest = active[-1]
+    status = "counting"
+    if latest.reset == "commit":
+        status = "committed/delaying"
+    elif latest.consensus == "10/10":
+        status = "committed/delaying"
+    print(f"{name:<12} current={status:<18} cycles={len(active):2d}  consensus={latest.consensus:<5}  home={latest.home} listeners={latest.listeners}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--recent", type=int, default=10, help="complete cycles per board (default: 10)")
@@ -151,6 +172,9 @@ def main() -> int:
             all_cycles.extend(convergence_dashboard(name, data)[0])
         if all_cycles:
             print(f"ALL BOARDS   episodes={len(all_cycles):2d}  typical={sum(all_cycles)/len(all_cycles):.1f} cycles  range={min(all_cycles)}–{max(all_cycles)}")
+        print("Current attempts | cycles since latest TEST RESET EXECUTED")
+        for name, data in datasets:
+            current_dashboard(name, data)
     else:
         print(f"Rendezvous dashboard | last {args.recent} complete cycles | KPI = exchange-start → deep-sleep")
         for i in range(4):
