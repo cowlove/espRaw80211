@@ -1255,12 +1255,6 @@ public:
                 spiffsScale = min(1.1F, max(0.9F, spiffsScale.read()));
             }
             spiffsCurrentRep = spiffsCurrentRep + 1;
-#ifndef CSIM
-            if (spiffsCurrentRep > 50 && beacon->ts % goal == beacon->ts % (goal * 2)) {
-                spiffsCurrentGoal = spiffsCurrentGoal * 5;
-                spiffsCurrentRep = 0;
-            }
-#endif
         } else {
             spiffsScale = 1.004;
         }
