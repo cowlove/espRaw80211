@@ -238,7 +238,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr uint32_t claimFreshnessWakes = 20;
     // Long-run test setting: retain association evidence across this many
     // rendezvous periods. Association records are aged by wake, not wall time.
-    static constexpr uint32_t associationFreshnessCycles = 20;
+    static constexpr uint32_t associationFreshnessCycles = 6;
     // Temporary long-run bootstrap test hook. Each device independently
     // commits to a reset after ten consecutive healthy cycles in which six
     // fresh associations select its home beacon. It then waits three more
