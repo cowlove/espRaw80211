@@ -11,6 +11,19 @@ to a beacon visible to all of them, without knowing how many clients exist.
 The capture HAL remains limited to beacon delivery.  Observation, gossip,
 selection, scouting, persistence, and sleep policy belong to the application.
 
+## Deployed prototype status
+
+The repository also contains an unattended six-device test harness. It is an
+experiment driver rather than part of the abstract rendezvous algorithm: it
+repeatedly forces devices back to clean protocol state so a long run produces
+many independent resynchronization episodes.
+
+Current firmware defaults are a 30-second nominal rendezvous period, Wi-Fi
+channel 4, 5 Hz ESP-NOW reporting while awake, 20-wake claim freshness,
+six-wake current-association freshness, six required fresh listeners, and ten
+consecutive healthy qualifying cycles before a reset commit. The old fivefold
+rendezvous-period growth experiment has been removed.
+
 ## Assumptions and limits
 
 - Membership is unknown and may change at any time.
@@ -90,12 +103,19 @@ received directly from the origin has age zero. Expired associations do not
 count as current listeners, while their independently aged visibility claims
 may remain useful.
 
-Association age is measured in elapsed seconds so correctness does not depend
-on every client using the same wake period. The singleton fast path compares
+Association age in the current prototype is measured in wake cycles, not
+elapsed seconds. An association at age 6 still counts; age 7 is expired.
+Relayed associations carry their origin age forward rather than becoming
+fresh merely because a relay was heard. The singleton fast path compares
 fresh association records: one listener on the current home and at least two
 listeners on a directly visible, locally usable candidate permits an immediate
 move. Visibility supporter sets continue to establish whether that move is
 physically possible; they no longer masquerade as current listener counts.
+
+The runtime `listeners=N` value is the number of distinct fresh association
+origins selecting the logged home beacon. It includes the local device when
+its own association is fresh and may include relayed evidence; it is not the
+number of other radios heard in the current exchange.
 
 ## ESP-NOW gossip
 
@@ -204,3 +224,24 @@ directly visible BSSIDs, received senders, claim insert/update/drop decisions,
 supporter sets, candidate ranking, proposal age, switch reason, and sleep
 deadline.  Tests should assert stable outcomes rather than depend only on log
 inspection.
+
+## Unattended reset experiment
+
+At the end of each wake, every device independently evaluates the test hook.
+A cycle qualifies when the ESP-NOW exchange is healthy and six fresh
+association origins select the device's home beacon. Qualifying cycles advance
+a persisted counter. A bad cycle records a miss; three misses clear an
+in-progress streak, allowing short interruptions without preserving a
+sustained false reunion.
+
+After ten qualifying cycles, the device persists an intentionally irreversible
+reset commit. It waits three completed wake cycles, then executes the reset
+even if the post-commit exchange has degraded. Execution clears the persisted
+home beacon, claims, associations, scout/proposal state, and test counters.
+The next wake is therefore a from-scratch acquisition episode.
+
+This is a per-device qualification rule, not a distributed global commit. A
+reset event proves that one device met its local criteria; it does not prove
+all six devices committed simultaneously. Analysis should distinguish observed
+rendezvous, ten-cycle qualification, reset execution, and completed
+reset-and-resynchronization episode throughput.
