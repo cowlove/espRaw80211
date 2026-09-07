@@ -9,7 +9,10 @@ append-mode serial logger in the same screen session.
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -18,7 +21,32 @@ from pathlib import Path
 
 
 SESSION_RE = re.compile(r"^(?P<id>\S+\.usb(?P<index>\d+))\s+\(")
-DEFAULT_ESPTOOL = Path.home() / ".arduino15/packages/esp8266/hardware/esp8266/3.1.2/tools/esptool/esptool.py"
+LEGACY_ESPTOOL = Path.home() / ".arduino15/packages/esp8266/hardware/esp8266/3.1.2/tools/esptool/esptool.py"
+
+
+def tool_path() -> str:
+    """Return a PATH that works from non-interactive SSH/screen shells."""
+    private_bin = Path.home() / "bin"
+    return f"{private_bin}:{os.environ.get('PATH', '')}"
+
+
+def find_esptool(explicit: Path | None) -> Path:
+    """Find Arduino's installed ESP32 esptool, with legacy fallbacks."""
+    if explicit is not None:
+        return explicit.expanduser().resolve()
+
+    arduino = Path.home() / ".arduino15/packages"
+    candidates = sorted(arduino.glob("esp32/tools/esptool_py/*/esptool"), reverse=True)
+    candidates += sorted(arduino.glob("esp32/tools/esptool_py/*/esptool.py"), reverse=True)
+    candidates += [LEGACY_ESPTOOL]
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate.resolve()
+    for name in ("esptool", "esptool.py"):
+        found = shutil.which(name, path=tool_path())
+        if found:
+            return Path(found).resolve()
+    return candidates[0] if candidates else arduino / "esp32/tools/esptool_py/esptool"
 
 
 @dataclass(frozen=True)
@@ -69,15 +97,16 @@ def deploy(
     erase_flash: bool,
     esptool: Path,
 ) -> None:
-    upload = (
-        f"make -C {project} BOARD=esp32 UPLOAD_PORT={session.port} upload"
+    prefix = f"export PATH={shlex.quote(tool_path())}; "
+    upload = prefix + (
+        f"make -C {shlex.quote(str(project))} BOARD=esp32 UPLOAD_PORT={session.port} upload"
     )
     erase = (
-        f"python3 {esptool} --chip esp32 --port {session.port} erase_flash"
+        f"{shlex.quote(str(esptool))} --chip esp32 --port {session.port} erase_flash"
     )
     monitor = (
-        f"make -C {project} BOARD=esp32 UPLOAD_PORT={session.port} cat "
-        f"| tee -a {project / session.logfile}"
+        f"make -C {shlex.quote(str(project))} BOARD=esp32 UPLOAD_PORT={session.port} cat "
+        f"| tee -a {shlex.quote(str(project / session.logfile))}"
     )
     # Ctrl-C stops the foreground make/cat pipeline without destroying the
     # screen session or its shell. Send it separately from the command: some
@@ -101,7 +130,9 @@ def build_firmware(project: Path, dry_run: bool) -> None:
         print("$", " ".join(command))
         return
     print("Building ESP32 firmware once before starting uploads...")
-    subprocess.run(command, check=True)
+    env = os.environ.copy()
+    env["PATH"] = tool_path()
+    subprocess.run(command, check=True, env=env)
     print("ESP32 firmware build completed; starting concurrent uploads.")
 
 
@@ -124,8 +155,8 @@ def main() -> int:
     parser.add_argument(
         "--esptool",
         type=Path,
-        default=DEFAULT_ESPTOOL,
-        help=f"esptool.py used by --erase-flash (default: {DEFAULT_ESPTOOL})",
+        default=None,
+        help="esptool executable override; otherwise discover Arduino ESP32 esptool",
     )
     args = parser.parse_args()
 
@@ -135,7 +166,7 @@ def main() -> int:
         return 1
 
     print("Found:", ", ".join(session.name for session in sessions))
-    esptool = args.esptool.expanduser().resolve()
+    esptool = find_esptool(args.esptool)
     if args.erase_flash:
         if not esptool.is_file():
             print(f"esptool.py not found: {esptool}", file=sys.stderr)
