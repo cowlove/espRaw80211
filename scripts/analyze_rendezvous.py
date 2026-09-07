@@ -83,9 +83,19 @@ def read_remote(host: str, path: str, tail_bytes: int) -> bytes:
 
 
 def dashboard(name: str, data: bytes, limit: int) -> None:
-    cycles = parse(data, limit)
+    cycles = parse(data, 1 if limit == 0 else limit)
     if not cycles:
         print(f"{name:<12} no complete rendezvous cycles")
+        return
+    if limit == 0:
+        latest = cycles[-1]
+        exchange = "healthy" if latest.healthy else "incomplete"
+        consensus = latest.consensus if latest.consensus != "-" else "-"
+        reset = f" reset={latest.reset}" if latest.reset else ""
+        print(
+            f"{name:<12} latest home={latest.home} listeners={latest.listeners} "
+            f"exchange={exchange} consensus={consensus}{reset}"
+        )
         return
     values = [c.seconds for c in cycles]
     avg = sum(values) / len(values)
@@ -168,7 +178,7 @@ def rendezvous_dashboard(name: str, data: bytes) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--recent", type=int, default=10, help="complete cycles per board (default: 10)")
+    ap.add_argument("--recent", type=int, default=10, help="complete cycles per board; 0 shows only latest state (default: 10)")
     ap.add_argument("--log-dir", type=Path, default=Path(__file__).resolve().parents[1])
     ap.add_argument("--remote-host", default="miner6.local")
     ap.add_argument("--remote-dir", default="~/src/espRaw80211")
