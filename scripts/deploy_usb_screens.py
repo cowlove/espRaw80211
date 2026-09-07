@@ -18,6 +18,7 @@ from pathlib import Path
 
 
 SESSION_RE = re.compile(r"^(?P<id>\S+\.usb(?P<index>\d+))\s+\(")
+DEFAULT_ESPTOOL = Path.home() / ".arduino15/packages/esp8266/hardware/esp8266/3.1.2/tools/esptool/esptool.py"
 
 
 @dataclass(frozen=True)
@@ -61,9 +62,18 @@ def screen_stuff(session: UsbSession, text: str, dry_run: bool) -> None:
     subprocess.run(command, check=True)
 
 
-def deploy(session: UsbSession, project: Path, dry_run: bool) -> None:
+def deploy(
+    session: UsbSession,
+    project: Path,
+    dry_run: bool,
+    erase_flash: bool,
+    esptool: Path,
+) -> None:
     upload = (
         f"make -C {project} BOARD=esp32 UPLOAD_PORT={session.port} upload"
+    )
+    erase = (
+        f"python3 {esptool} --chip esp32 --port {session.port} erase_flash"
     )
     monitor = (
         f"make -C {project} BOARD=esp32 UPLOAD_PORT={session.port} cat "
@@ -79,9 +89,10 @@ def deploy(session: UsbSession, project: Path, dry_run: bool) -> None:
         print("  (wait 0.25s)")
     else:
         time.sleep(0.25)
-    # The shell's && ensures logging starts only after esptool reports a
-    # successful upload.
-    screen_stuff(session, f"{upload} && {monitor}\n", dry_run)
+    # The shell's && ensures upload and logging start only after an optional
+    # erase and the upload both succeed. Erasing is deliberately opt-in.
+    command = f"{erase} && {upload}" if erase_flash else upload
+    screen_stuff(session, f"{command} && {monitor}\n", dry_run)
 
 
 def build_firmware(project: Path, dry_run: bool) -> None:
@@ -105,6 +116,17 @@ def main() -> int:
     parser.add_argument(
         "--dry-run", action="store_true", help="print screen commands without sending them"
     )
+    parser.add_argument(
+        "--erase-flash",
+        action="store_true",
+        help="erase each ESP32 flash completely before uploading (destructive)",
+    )
+    parser.add_argument(
+        "--esptool",
+        type=Path,
+        default=DEFAULT_ESPTOOL,
+        help=f"esptool.py used by --erase-flash (default: {DEFAULT_ESPTOOL})",
+    )
     args = parser.parse_args()
 
     sessions = find_sessions()
@@ -113,12 +135,24 @@ def main() -> int:
         return 1
 
     print("Found:", ", ".join(session.name for session in sessions))
+    esptool = args.esptool.expanduser().resolve()
+    if args.erase_flash:
+        if not esptool.is_file():
+            print(f"esptool.py not found: {esptool}", file=sys.stderr)
+            return 1
+        print(f"Flash erase enabled; using {esptool}")
     # Build before touching any screen session. A failed build leaves the
     # existing serial monitors running and prevents concurrent make processes
     # from fighting over the shared build directory.
     build_firmware(args.project.resolve(), args.dry_run)
     for session in sessions:
-        deploy(session, args.project.resolve(), args.dry_run)
+        deploy(
+            session,
+            args.project.resolve(),
+            args.dry_run,
+            args.erase_flash,
+            esptool,
+        )
     return 0
 
 
