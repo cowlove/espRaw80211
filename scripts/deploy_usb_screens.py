@@ -49,6 +49,12 @@ def find_esptool(explicit: Path | None) -> Path:
     return candidates[0] if candidates else arduino / "esp32/tools/esptool_py/esptool"
 
 
+def esptool_command(esptool: Path) -> str:
+    """Build a shell command for either Arduino's binary or Python script."""
+    command = ["python3", str(esptool)] if esptool.suffix == ".py" else [str(esptool)]
+    return " ".join(shlex.quote(part) for part in command)
+
+
 @dataclass(frozen=True)
 class UsbSession:
     screen_id: str
@@ -102,7 +108,7 @@ def deploy(
         f"make -C {shlex.quote(str(project))} BOARD=esp32 UPLOAD_PORT={session.port} upload"
     )
     erase = (
-        f"{shlex.quote(str(esptool))} --chip esp32 --port {session.port} erase_flash"
+        f"{esptool_command(esptool)} --chip esp32 --port {session.port} erase_flash"
     )
     monitor = (
         f"make -C {shlex.quote(str(project))} BOARD=esp32 UPLOAD_PORT={session.port} cat "
