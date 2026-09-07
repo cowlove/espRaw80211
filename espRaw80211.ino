@@ -1267,6 +1267,24 @@ public:
         uint64_t sleepUsec =
             (timeToGoal - awakeSincePacket) * spiffsScale;
         const uint64_t homeBssid = spiffsBeacon.read();
+        // The older "late" diagnostic is relative to the beacon that
+        // anchored this sleep calculation. During a scout wake that may not
+        // be the persisted home beacon, so record both identities and the
+        // complete deadline relationship for offline analysis.
+        out("rendezvous timing mode %s home %012llx target %012llx anchor %012llx target-hit %u beacon-rx-usec %llu exchange-usec %llu-%llu awake-after-beacon-usec %llu deadline-usec %llu sleep-usec %llu late-usec %d late-pct %.3f",
+            scoutRendezvousWake ? "scout-rendezvous" :
+            (scoutWake ? "scout-acquire" : "home"),
+            (unsigned long long)homeBssid,
+            (unsigned long long)targetBeacon,
+            (unsigned long long)beacon->ssid,
+            (unsigned)targetHits,
+            (unsigned long long)packetRxTime,
+            (unsigned long long)espNowStartUsec,
+            (unsigned long long)espNowEndUsec,
+            (unsigned long long)awakeSincePacket,
+            (unsigned long long)timeToGoal,
+            (unsigned long long)sleepUsec,
+            usecLate, percentLate);
         const bool healthyExchange = exchangeHealthy();
         const uint64_t candidateBssid = healthyExchange ?
             reportOnlyCandidate(homeBssid) : homeBssid;
