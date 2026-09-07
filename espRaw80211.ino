@@ -232,6 +232,10 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr size_t reportMaxAssociations = 4;
     static constexpr int reportMinRssi = -85;
     static constexpr int minimumCandidatePackets = 3;
+    // Testing-only bootstrap policy: after flash erase or an automatic test
+    // reset, sample one of the six loudest eligible beacons instead of always
+    // taking the single strongest one. Normal home/scout selection is unchanged.
+    static constexpr size_t testStartupTopN = 6;
     static constexpr uint64_t reportPeriodUsec = 200000;
     static constexpr uint64_t defaultRendezvousUsec = 30ULL * 1000000ULL;
     static constexpr uint32_t scoutIntervalWakes = 2;
@@ -1039,6 +1043,54 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         return best;
     }
 
+    static bool louderStartupBeacon(const BeaconInfo &a,
+                                    const BeaconInfo &b) {
+        if (a.rssi != b.rssi) return a.rssi > b.rssi;
+        if (a.count != b.count) return a.count > b.count;
+        return a.ssid < b.ssid;
+    }
+
+    int randomStartupBeaconIndex() const {
+        int candidates[packetLogSize];
+        size_t count = 0;
+        for (size_t i = 0; i < packetLogSize; ++i) {
+            const BeaconInfo &info = packetLog[i];
+            if (info.ssid == 0 || info.rssi < reportMinRssi ||
+                info.count < minimumCandidatePackets)
+                continue;
+            candidates[count++] = (int)i;
+        }
+        for (size_t i = 1; i < count; ++i) {
+            const int value = candidates[i];
+            size_t j = i;
+            while (j > 0 && louderStartupBeacon(packetLog[value],
+                                                  packetLog[candidates[j - 1]])) {
+                candidates[j] = candidates[j - 1];
+                --j;
+            }
+            candidates[j] = value;
+        }
+        const size_t topCount = min(count, testStartupTopN);
+        if (topCount == 0) return bestBeaconIndex();
+        uint32_t randomValue = 0;
+#ifdef CSIM
+        randomValue = (uint32_t)rand();
+#else
+        randomValue = esp_random();
+#endif
+        out("startup-random candidates %d top %d", (int)count,
+            (int)topCount);
+        for (size_t i = 0; i < topCount; ++i)
+            out("startup-random candidate %d beacon %012llx rssi %d packets %d",
+                (int)i, (unsigned long long)packetLog[candidates[i]].ssid,
+                packetLog[candidates[i]].rssi, packetLog[candidates[i]].count);
+        const int selected = candidates[randomValue % topCount];
+        out("startup-random selected beacon %012llx rank %u of %u",
+            (unsigned long long)packetLog[selected].ssid,
+            (unsigned)((randomValue % topCount) + 1), (unsigned)topCount);
+        return selected;
+    }
+
     void out(const char *fmt, ...) const {
         va_list args;
         va_start(args, fmt);
@@ -1216,7 +1268,9 @@ public:
         }
         if (result.count == 0) {
             out("Target beacon not received in broad scan, picking best observed beacon");
-            const int best = bestBeaconIndex();
+            const bool uninitializedStartup = spiffsBeacon.read() == 0;
+            const int best = uninitializedStartup ?
+                randomStartupBeaconIndex() : bestBeaconIndex();
             out("best beacon: %02d %012llx %3d %6d %016llx %016llx", best,
                 (unsigned long long)packetLog[best].ssid, packetLog[best].rssi,
                 packetLog[best].count, (unsigned long long)packetLog[best].seen,
