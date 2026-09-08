@@ -503,6 +503,24 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         return count;
     }
 
+    void dumpAssociationTable(uint64_t homeBssid) const {
+        out("association-table home %012llx listeners %d freshness %u wake %u",
+            (unsigned long long)homeBssid, (int)listenerCount(homeBssid),
+            associationFreshnessCycles, wakeGeneration);
+        for (const BeaconAssociation &association : associations) {
+            if (association.originMac == 0) continue;
+            const uint32_t age = associationAgeCycles(association);
+            const bool selectedHome = association.selectedBeacon == homeBssid;
+            const bool fresh = age <= associationFreshnessCycles;
+            out("association origin %012llx selected %012llx generation %u age %u selected-home %u fresh %u qualifies %u",
+                (unsigned long long)association.originMac,
+                (unsigned long long)association.selectedBeacon,
+                association.originGeneration, age,
+                selectedHome ? 1U : 0U, fresh ? 1U : 0U,
+                selectedHome && fresh ? 1U : 0U);
+        }
+    }
+
     static int score(const BeaconInfo &info) { return info.count; }
 
     static bool betterQuality(const BeaconInfo &a, const BeaconInfo &b) {
@@ -1399,6 +1417,7 @@ public:
             (unsigned long long)privMux.getLastReceiveMac(),
             switched ? " SWITCH" : "");
         dumpExchangePeers();
+        dumpAssociationTable(homeBssid);
         dumpDeviceBeaconMatrix();
         out("deep sleep %.1f sec, goal %.1f scale %f", sleepUsec / 1000000.0,
             goal / 1000000.0, spiffsScale.read());
