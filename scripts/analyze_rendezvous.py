@@ -329,6 +329,42 @@ def print_current_home_distribution(datasets, summaries=None, parsed=None) -> No
         print(f"  unknown-home devices={len(unknown)}  boards={','.join(unknown)}")
 
 
+def remap_cycles_by_current_identity(parsed):
+    """Regroup historical cycles under the USB alias owning that board now."""
+    # USB numbers identify today's logger connections, not physical boards.
+    # Recover physical identity from report-clock-rx, which ties an incarnation
+    # to the sender's stable ESP MAC.  Anchor each MAC to the USB alias owning
+    # its most-recent incarnation, then regroup older cycles under that alias.
+    epoch_macs = defaultdict(set)
+    for cycles in parsed.values():
+        for cycle in cycles:
+            for record in cycle.received_clocks:
+                if record.get('incarnation') and record.get('sender'):
+                    epoch_macs[record['incarnation']].add(record['sender'])
+    epoch_mac = {epoch: next(iter(macs)) for epoch, macs in epoch_macs.items()
+                 if len(macs) == 1}
+    mac_aliases = defaultdict(set)
+    for name, cycles in parsed.items():
+        latest_epoch = next((cycle.epoch for cycle in reversed(cycles) if cycle.epoch), None)
+        if latest_epoch in epoch_mac:
+            mac_aliases[epoch_mac[latest_epoch]].add(name)
+    mac_alias = {mac: next(iter(names)) for mac, names in mac_aliases.items()
+                 if len(names) == 1}
+
+    remapped = defaultdict(list)
+    for stream_name, cycles in parsed.items():
+        for cycle in cycles:
+            mac = epoch_mac.get(cycle.epoch)
+            alias = mac_alias.get(mac)
+            # Keep unresolved current data under its connection label. It can
+            # still define opportunities, but cannot be used as attributed
+            # sender evidence until another board identifies its incarnation.
+            remapped[alias or stream_name].append(cycle)
+    parsed = dict(remapped)
+    board_origins = {alias: {mac} for mac, alias in mac_alias.items()}
+    return parsed, board_origins
+
+
 def pairwise_link_stats_all(datasets, parsed_evidence=None):
     """Measure all link contexts with one parse and a time-window sweep."""
     # Legacy formats lack the exchange identity and appointment semantics needed
@@ -339,25 +375,7 @@ def pairwise_link_stats_all(datasets, parsed_evidence=None):
                if cycle.wire is not None and cycle.wire >= SCOUT_LINK_MIN_WIRE_VERSION]
         for name, data in datasets
     }
-    epoch_owners = defaultdict(set)
-    for name, cycles in parsed.items():
-        for cycle in cycles:
-            if cycle.epoch:
-                epoch_owners[cycle.epoch].add(name)
-
-    # report-clock-rx ties an on-wire sender identity to the sender's unique
-    # incarnation. Reuse that mapping for all per-origin summary counters.
-    origin_owners = defaultdict(set)
-    for cycles in parsed.values():
-        for cycle in cycles:
-            for record in cycle.received_clocks:
-                owners = epoch_owners.get(record.get('incarnation'), set())
-                if len(owners) == 1 and record.get('sender'):
-                    origin_owners[record['sender']].update(owners)
-    board_origins = defaultdict(set)
-    for origin, owners in origin_owners.items():
-        if len(owners) == 1:
-            board_origins[next(iter(owners))].add(origin)
+    parsed, board_origins = remap_cycles_by_current_identity(parsed)
 
     rows = {context: [] for context in ('scout', 'home', 'all')}
     for left, right in combinations(sorted(parsed), 2):
@@ -400,9 +418,10 @@ def pairwise_link_stats_all(datasets, parsed_evidence=None):
             def direction(receiver_cycles, sender):
                 values = []
                 raw_values = []
-                known = bool(board_origins[sender])
+                sender_origins = board_origins.get(sender, set())
+                known = bool(sender_origins)
                 for receiver in receiver_cycles:
-                    peer_rows = [receiver.peers[origin] for origin in board_origins[sender]
+                    peer_rows = [receiver.peers[origin] for origin in sender_origins
                                  if origin in receiver.peers]
                     values.append(sum(int(peer.get('valid', 0)) for peer in peer_rows))
                     raw_values.append(sum(int(peer.get('frames', 0)) for peer in peer_rows))

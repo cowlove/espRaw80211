@@ -136,7 +136,16 @@ def parse_evidence(data):
             values = fields(body.split('espnow summary ', 1)[1])
             current.peers[values['origin']] = values
         if 'report-clock-rx sender ' in body:
-            current.received_clocks.append(fields(body.split('report-clock-rx ', 1)[1]))
+            clock_body = body.split('report-clock-rx ', 1)[1]
+            values = fields(clock_body)
+            # Serial output can occasionally concatenate the next TX record
+            # without a newline. Preserve the RX record's leading identity
+            # instead of allowing duplicate trailing fields to overwrite it.
+            identity = re.match(r'sender ([0-9a-f]+) incarnation ([0-9a-f]+)',
+                                clock_body)
+            if identity:
+                values['sender'], values['incarnation'] = identity.groups()
+            current.received_clocks.append(values)
         found = APPOINTMENT.search(body)
         if found and (current.sequence is None or int(found[1]) == current.sequence):
             current.appointment_kinds.add(found[2])

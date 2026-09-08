@@ -110,6 +110,15 @@ class EvidenceTests(unittest.TestCase):
         cycles, _ = evidence.parse_evidence(data)
         self.assertEqual(cycles[0].peers['123']['radio-from'], '321')
 
+    def test_concatenated_tx_does_not_overwrite_rx_incarnation(self):
+        extra = line(
+            '00006.0 report-clock-rx sender aaa incarnation a1 wake 1 packet 0 '
+            'local-rx 6000000 bssid abc valid 1 exchange 1report-clock-tx '
+            'incarnation b2 wake 2 packet 0 bssid abc')
+        cycles, _ = evidence.parse_evidence(cycle(epoch='b2', extra=extra, wire=7))
+        self.assertEqual(cycles[0].received_clocks[0]['sender'], 'aaa')
+        self.assertEqual(cycles[0].received_clocks[0]['incarnation'], 'a1')
+
     def test_scout_pairwise_bandwidth_excludes_home_only(self):
         # Incarnations identify each board; clock samples map its wire origin.
         a_extra = (line('00006.0 report-clock-rx sender bbb incarnation bb wake 1 packet 0 local-rx 6000000 bssid abc valid 1 exchange 1') +
@@ -147,6 +156,31 @@ class EvidenceTests(unittest.TestCase):
             ('b', cycle(epoch='bb', extra=b_extra, kind='home', end_second=5)),
         ])
         self.assertEqual(legacy_rows, [])
+
+    def test_historical_usb_swaps_remap_to_current_alias(self):
+        def observed(epoch, sender):
+            return line(f'00006.0 report-clock-rx sender {sender} incarnation {epoch} '
+                        'wake 1 packet 0 local-rx 6000000 bssid abc valid 1 exchange 1')
+
+        # USB labels swapped between the old and current captures. Peer clock
+        # records provide the stable MAC for every incarnation.
+        streams = {
+            'usb0': evidence.parse_evidence(
+                cycle(epoch='b1', second=0, wire=7) +
+                cycle(epoch='a2', second=20, wire=7))[0],
+            'usb1': evidence.parse_evidence(
+                cycle(epoch='a1', second=0, wire=7) +
+                cycle(epoch='b2', second=20, wire=7))[0],
+            'observer': evidence.parse_evidence(cycle(
+                epoch='observer', second=40, wire=7,
+                extra=(observed('a1', 'aaa') + observed('a2', 'aaa') +
+                       observed('b1', 'bbb') + observed('b2', 'bbb'))))[0],
+        }
+        remapped, origins = analyzer.remap_cycles_by_current_identity(streams)
+        self.assertEqual([cycle.epoch for cycle in remapped['usb0']], ['a2', 'a1'])
+        self.assertEqual([cycle.epoch for cycle in remapped['usb1']], ['b1', 'b2'])
+        self.assertEqual(origins['usb0'], {'aaa'})
+        self.assertEqual(origins['usb1'], {'bbb'})
 
 
 if __name__ == '__main__':
