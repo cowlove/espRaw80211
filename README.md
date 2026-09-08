@@ -105,6 +105,17 @@ environment cannot build safely.
 
 ## Limitations
 
+For empirical CSIM experiments, `--reception-scale VALUE` multiplies both the
+directed healthy-window probability and per-packet delivery probability. The
+default is `0.60`; values above `1.0` improve reception and resulting
+probabilities are capped at 100%. CSIM prints the effective value at startup.
+
+```sh
+make BOARD=csim espRaw80211_csim
+make BOARD=csim clear-state
+./espRaw80211_csim --seconds 7200 --reception-scale 0.8
+```
+
 - Only one Wi-Fi channel is monitored.
 - A common beacon may not be physically visible to every board; a stable
   logical partition is then valid behavior.

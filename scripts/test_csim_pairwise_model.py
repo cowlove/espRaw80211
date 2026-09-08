@@ -20,6 +20,9 @@ int main() {
     assert(scaledSuccess(1.0f) > 0.59f && scaledSuccess(1.0f) < 0.61f);
     assert(scaledSuccess(0.0f) == 0.0f);
     assert(scaledSuccess(0.5f) > 0.29f && scaledSuccess(0.5f) < 0.31f);
+    receptionScale = 2.0f;
+    assert(scaledSuccess(0.75f) == 1.0f);
+    receptionScale = 0.60f;
 
     // Inactive receivers and measured-zero links always drop.
     assert(drop(firstMac + 1, firstMac));

@@ -1946,12 +1946,32 @@ public:
 };
 
 #ifdef CSIM
-struct PairwiseModelInstaller {
+struct PairwiseModelInstaller : public Csim_Module {
     PairwiseModelInstaller() {
         sim().espnowDeliveryFailureHook =
             [](uint64_t sender, uint64_t receiver) {
                 return CsimPairwiseModel::drop(sender, receiver);
             };
+    }
+
+    void parseArg(char **&arg, char **end) override {
+        if (strcmp(*arg, "--reception-scale") != 0) return;
+        if (arg + 1 >= end) {
+            fprintf(stderr, "--reception-scale requires a nonnegative number\n");
+            exit(2);
+        }
+        char *tail = nullptr;
+        const float value = strtof(*(++arg), &tail);
+        if (!tail || *tail || !isfinite(value) || value < 0) {
+            fprintf(stderr, "invalid --reception-scale value\n");
+            exit(2);
+        }
+        CsimPairwiseModel::receptionScale = value;
+    }
+
+    void setup() override {
+        printf("csim reception-scale %.6g\n",
+               CsimPairwiseModel::receptionScale);
     }
 };
 static PairwiseModelInstaller pairwiseModelInstaller;

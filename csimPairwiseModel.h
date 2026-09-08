@@ -15,7 +15,7 @@ static constexpr uint64_t firstMac = 0xddeeff000001ULL;
 static constexpr float nominalPacketsPerSecond = 5.0f;
 // Apply one deliberately conservative scale to both empirical success gates.
 // This stands in for dependencies missing from the first measured model.
-static constexpr float receptionScale = 0.60f;
+inline float receptionScale = 0.60f;
 static constexpr uint64_t seed = 0x6d5a56e9d31b4a27ULL;
 
 struct ReceiverState {
@@ -48,8 +48,8 @@ inline uint32_t sample(uint8_t receiver, uint8_t sender, uint32_t window,
 
 inline float scaledSuccess(float success) {
     if (success <= 0) return 0;
-    if (success >= 1) return receptionScale;
-    return success * receptionScale;
+    const float scaled = success * receptionScale;
+    return scaled >= 1 ? 1 : scaled;
 }
 
 inline void beginWindow(uint64_t receiverMac, uint32_t window) {
