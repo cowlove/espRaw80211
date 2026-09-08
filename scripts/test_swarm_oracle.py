@@ -47,15 +47,16 @@ class SwarmOracleTests(unittest.TestCase):
         self.assertEqual(analyzer.human_age(3661), '1h1m')
 
     def test_current_home_distribution_is_popularity_sorted(self):
-        def data(home):
-            return (f'2026-09-08T12:00:00-07:00 host_mono_ns=1 board=x port=/dev/x session=s | '
-                    f'00000.1 report-identity incarnation aa wake 1 wire-version 7 exchange 1\n'
-                    f'2026-09-08T12:00:00-07:00 host_mono_ns=2 board=x port=/dev/x session=s | '
+        def data(home, minute=0, wake=1):
+            prefix = f'2026-09-08T12:{minute:02d}'
+            return (f'{prefix}:00-07:00 host_mono_ns=1 board=x port=/dev/x session=s | '
+                    f'00000.1 report-identity incarnation aa wake {wake} wire-version 7 exchange {wake}\n'
+                    f'{prefix}:00-07:00 host_mono_ns=2 board=x port=/dev/x session=s | '
                     f'00005.0 ESP-NOW exchange phase started\n'
-                    f'2026-09-08T12:00:01-07:00 host_mono_ns=3 board=x port=/dev/x session=s | '
+                    f'{prefix}:01-07:00 host_mono_ns=3 board=x port=/dev/x session=s | '
                     f'00010.0 gossip home exchange healthy home {home} listeners 1 rawrx 1 rx 1 valid 1\n'
-                    f'2026-09-08T12:00:02-07:00 host_mono_ns=4 board=x port=/dev/x session=s | '
-                    f'00010.1 exchange complete interval 1\n').encode()
+                    f'{prefix}:02-07:00 host_mono_ns=4 board=x port=/dev/x session=s | '
+                    f'00010.1 exchange complete interval {wake}\n').encode()
         datasets = [('c', data('bbb')), ('a', data('aaa')), ('b', data('aaa')),
                     ('missing', b'no complete observation\n')]
         rows, unknown = analyzer.current_home_distribution(datasets)
@@ -64,3 +65,26 @@ class SwarmOracleTests(unittest.TestCase):
             {'bssid': 'bbb', 'devices': 1, 'boards': ['c']},
         ])
         self.assertEqual(unknown, ['missing'])
+
+    def test_current_distribution_stability_resets_on_a_move(self):
+        def data(board, observations):
+            chunks = []
+            for wake, (minute, home) in enumerate(observations, 1):
+                prefix = f'2026-09-08T12:{minute:02d}'
+                chunks.append(
+                    f'{prefix}:00-07:00 host_mono_ns=1 board={board} port=/dev/x session=s | '
+                    f'00000.1 report-identity incarnation aa wake {wake} wire-version 7 exchange {wake}\n'
+                    f'{prefix}:00-07:00 host_mono_ns=2 board={board} port=/dev/x session=s | '
+                    f'00005.0 ESP-NOW exchange phase started\n'
+                    f'{prefix}:01-07:00 host_mono_ns=3 board={board} port=/dev/x session=s | '
+                    f'00010.0 gossip home exchange healthy home {home} listeners 1 rawrx 1 rx 1 valid 1\n'
+                    f'{prefix}:02-07:00 host_mono_ns=4 board={board} port=/dev/x session=s | '
+                    f'00010.1 exchange complete interval {wake}\n')
+            return ''.join(chunks).encode()
+        datasets = [
+            ('a', data('a', [(0, 'aaa'), (2, 'bbb'), (4, 'bbb')])),
+            ('b', data('b', [(1, 'aaa'), (3, 'bbb'), (5, 'bbb')])),
+        ]
+        # a's move starts the current assignment; b's later move changes it
+        # again, followed by two more unchanged observations.
+        self.assertEqual(analyzer.current_home_unchanged_cycles(datasets), 3)

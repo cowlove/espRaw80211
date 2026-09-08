@@ -274,9 +274,44 @@ def current_home_distribution(datasets):
     return rows, sorted(unknown)
 
 
+def current_home_unchanged_cycles(datasets) -> int:
+    """Count completed wake observations in the current full assignment.
+
+    A distribution includes which logged board occupies which BSSID, not merely
+    the group-size histogram. Counting begins once every logged board has a
+    usable home. A later observation that moves one board starts a new count.
+    The result is necessarily bounded by the retained log suffixes.
+    """
+    board_names = {name for name, _ in datasets}
+    observations = []
+    for name, data in datasets:
+        for cycle in evidence.parse_evidence(data)[0]:
+            if cycle.wall is not None and cycle.home:
+                observations.append((cycle.wall, name, cycle.home))
+    observations.sort()
+    latest = {}
+    stable_cycles = 0
+    for _, name, home in observations:
+        previous = latest.get(name)
+        latest[name] = home
+        if set(latest) != board_names:
+            continue
+        if previous is not None and previous != home:
+            stable_cycles = 1
+        elif stable_cycles:
+            stable_cycles += 1
+        else:
+            # This observation completed the first full assignment visible in
+            # the retained tails.
+            stable_cycles = 1
+    return stable_cycles
+
+
 def print_current_home_distribution(datasets) -> None:
     rows, unknown = current_home_distribution(datasets)
-    print('Current home distribution | latest observation per logged board')
+    stable_cycles = current_home_unchanged_cycles(datasets)
+    print('Current home distribution | latest observation per logged board | '
+          f'unchanged in {stable_cycles} completed wake cycles (retained tails)')
     if not rows:
         print('  no current home observations')
     for row in rows:
@@ -350,6 +385,7 @@ def main() -> int:
     if args.evidence or args.overlaps or args.json:
         summaries = {name: evidence.summarize(data) for name, data in datasets}
         home_distribution, unknown_homes = current_home_distribution(datasets)
+        home_distribution_unchanged_cycles = current_home_unchanged_cycles(datasets)
         pairs = evidence.overlaps(datasets) if args.overlaps else []
         caveats = ['Overlap is same-BSSID planned-window evidence, not proof of radio delivery.',
                    'Host clocks must be approximately aligned; 15-second host-time gate applied.',
@@ -358,6 +394,8 @@ def main() -> int:
         if args.json:
             print(json.dumps({'boards': summaries,
                               'current_home_distribution': home_distribution,
+                              'current_home_distribution_unchanged_cycles':
+                                  home_distribution_unchanged_cycles,
                               'unknown_home_boards': unknown_homes,
                               'overlaps': pairs,
                               'warnings': warnings, 'caveats': caveats}, indent=2))
