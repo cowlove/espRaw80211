@@ -39,7 +39,16 @@ def clean(data: bytes) -> list[str]:
 def parse(data: bytes, limit: int) -> list[Cycle]:
     cycles: list[Cycle] = []
     current: Cycle | None = None
+    session_start = 0
     for line in clean(data):
+        # Logger sessions delimit capture continuity, not device resets.
+        # Never let a partial cycle or its trailing counters span sessions.
+        if ' | ' in line and ' host_mono_ns=' in line:
+            line = line.split(' | ', 1)[1]
+        if line.startswith('logger-session '):
+            current = None
+            session_start = len(cycles)
+            continue
         m = STAMP.match(line)
         if not m:
             continue
@@ -53,9 +62,9 @@ def parse(data: bytes, limit: int) -> list[Cycle]:
             if current.end >= current.start:
                 cycles.append(current)
             current = None
-        elif "TEST RESET EXECUTED" in line and cycles:
+        elif "TEST RESET EXECUTED" in line and len(cycles) > session_start:
             cycles[-1].reset = "EXECUTED"
-        elif "TEST RESET COMMITTED" in line and cycles:
+        elif "TEST RESET COMMITTED" in line and len(cycles) > session_start:
             cycles[-1].reset = "commit"
         elif current is not None:
             m = GOSSIP.search(line)
@@ -65,7 +74,7 @@ def parse(data: bytes, limit: int) -> list[Cycle]:
             m = CONSENSUS.search(line)
             if m:
                 current.consensus = m.group(1) + "/10"
-        elif "test consensus" in line and cycles:
+        elif "test consensus" in line and len(cycles) > session_start:
             m = CONSENSUS.search(line)
             if m:
                 cycles[-1].consensus = m.group(1) + "/10"

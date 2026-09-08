@@ -93,8 +93,9 @@ python3 scripts/deploy_usb_screens.py
 This builds once, terminates matching `*.usbN` screen sessions, uploads each
 selected `/dev/ttyUSB<N>`, and creates fresh detached screen sessions whose
 append-mode logger starts only after a successful upload. Use `--boards 0,1,2,3`
-to select explicit ports, `--erase-flash` for a destructive clean start, and
-`--keep-screens` only when deliberately reusing existing sessions. Logs append
+to select explicit ports and `--erase-flash` for a destructive clean start.
+Uploads run synchronously, one board at a time; failures stop deployment.
+The unsupported `--keep-screens` option has been removed. Logs append
 to `cat.usbN.out`; each line is prefixed by `scripts/timestamp_serial.py` with
 host wall time, monotonic nanoseconds, board, port, and logger session ID while
 preserving the original firmware text. Miner6 is a separate host with two boards.

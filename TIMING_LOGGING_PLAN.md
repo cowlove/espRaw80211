@@ -2,6 +2,43 @@
 
 Status: design agreed; firmware packet changes are not yet implemented.
 
+## Review amendments and implementation boundary (2026-09-08)
+
+These amendments supersede conflicting details in the original proposal below.
+
+- All devices always use one fixed Wi-Fi channel. Membership, logical
+  appointments, and power scheduling are separate concepts. Preserve every
+  home appointment; add fair rotating scout appointments and merge overlapping
+  or nearby radio-active intervals. Stay awake across merged appointments;
+  never replace a home visit merely because a scout is nearby.
+- Age evidence and evaluate the test harness by logical rounds/elapsed time,
+  not physical boot count. Continuous-awake operation must still advance rounds.
+- Keep paired full beacon TSF and local reception timestamps in diagnostics.
+  Use a consistent local origin and signed differences for TSF projection.
+- Preserve delayed ESP-NOW initialization. Jim reports that early initialization
+  reduced or sometimes pathologically eliminated promiscuous monitor callbacks.
+  This is an observed hardware workaround, not a proven explanation of the
+  driver interaction. Preserve beacon-only acquisition before initialization;
+  any change requires measuring capture continuity on hardware.
+- Add reset-safe origin incarnation semantics; schema revisions are unrelated
+  to freshness generations. Do not reject a newly reset origin indefinitely.
+- Packet timing belongs once in the sender header where possible, not repeated
+  for every claim. Planned ends and actual ends are distinct. Short deltas need
+  checked bounds. Wire layout remains provisional pending implementation.
+- Count successful merges separately from attempts/rejections, and collect
+  raw per-source evidence before mux filtering. Normalize physical MAC format.
+- Logger sessions are not board epochs. A logger restart alone does not reset
+  firmware, and a firmware reset need not restart the logger.
+
+First implementation slice: checked sequential uploads, fresh screen names,
+removal of broken `--keep-screens`, timestamp-prefix parsing, capture-boundary
+handling, UUID logger identities, and the initialization-workaround comment.
+Host-only regression tests exercise parser equivalence and erase failure.
+No board deployment or scheduler rewrite is included in this slice. Screen
+liveness is reported separately from actual serial reception. Session/time
+selection, port-owner checks, logger readiness handshake, TSF projection repair,
+truthful firmware counters, and interval scheduling remain follow-up work.
+
 This document records the agreed direction for the next implementation pass.
 The six deployed boards are controlled as one ecosystem: a firmware packet
 layout revision is deployed to all six boards together. Backward compatibility
@@ -173,4 +210,3 @@ overlap because serial output can be buffered or delayed.
 6. Build, deploy, and erase/reflash all six boards as one controlled revision.
 7. Run a clean experiment and review packet size, timing, and log volume before
    adding further fields.
-

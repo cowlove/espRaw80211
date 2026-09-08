@@ -9,6 +9,7 @@ import os
 import socket
 import sys
 import time
+import uuid
 
 
 def main() -> int:
@@ -18,7 +19,7 @@ def main() -> int:
     args = parser.parse_args()
 
     host = socket.gethostname()
-    session = f"{host}-{os.getpid()}"
+    session = f"{host}-{uuid.uuid4().hex}"
     def emit(payload: str) -> None:
         wall = datetime.now().astimezone().isoformat(timespec="microseconds")
         mono = time.monotonic_ns()

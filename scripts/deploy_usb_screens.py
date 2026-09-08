@@ -40,7 +40,7 @@ def find_esptool(explicit: Path | None) -> Path:
     candidates += sorted(arduino.glob("esp32/tools/esptool_py/*/esptool.py"), reverse=True)
     candidates += [LEGACY_ESPTOOL]
     for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
+        if candidate.is_file() and (candidate.suffix == '.py' or os.access(candidate, os.X_OK)):
             return candidate.resolve()
     for name in ("esptool", "esptool.py"):
         found = shutil.which(name, path=tool_path())
@@ -93,11 +93,11 @@ def screen_quit(session: UsbSession, dry_run: bool) -> None:
     if dry_run:
         print("$", " ".join(command))
         return
-    subprocess.run(command, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(command, check=True)
 
 
 def start_screen(session: UsbSession, command: str, dry_run: bool) -> None:
-    screen_command = ["screen", "-dmS", session.screen_id, "bash", "-lc", command]
+    screen_command = ["screen", "-dmS", f"esp.{session.name}", "bash", "-c", command]
     if dry_run:
         print("$", " ".join(shlex.quote(part) for part in screen_command))
         return
@@ -111,13 +111,19 @@ def deploy(
     erase_flash: bool,
     esptool: Path,
 ) -> None:
-    prefix = f"export PATH={shlex.quote(tool_path())}; "
-    upload = prefix + (
-        f"make -C {shlex.quote(str(project))} BOARD=esp32 UPLOAD_PORT={session.port} upload"
-    )
-    erase = (
-        f"{esptool_command(esptool)} --chip esp32 --port {session.port} erase_flash"
-    )
+    env = os.environ.copy()
+    env['PATH'] = tool_path()
+    commands = []
+    if erase_flash:
+        commands.append(shlex.split(esptool_command(esptool)) +
+                        ['--chip', 'esp32', '--port', session.port, 'erase_flash'])
+    commands.append(['make', '-C', str(project), 'BOARD=esp32',
+                     f'UPLOAD_PORT={session.port}', 'upload'])
+    # Flash synchronously: detached-screen success is not upload success.
+    for command in commands:
+        print('$', shlex.join(command))
+        if not dry_run:
+            subprocess.run(command, check=True, env=env)
     monitor = (
         f"make -C {shlex.quote(str(project))} BOARD=esp32 UPLOAD_PORT={session.port} cat "
         f"| python3 {shlex.quote(str(project / 'scripts/timestamp_serial.py'))} "
@@ -125,10 +131,12 @@ def deploy(
         f"| tee -a {shlex.quote(str(project / session.logfile))}"
     )
     print(f"{session.name}: {session.port} -> {session.logfile}")
-    command = f"{erase} && {upload}" if erase_flash else upload
-    # A fresh shell owns the whole lifecycle. The logger starts only after a
-    # successful erase/upload and remains in the new screen session.
-    start_screen(session, f"{command} && {monitor}", dry_run)
+    start_screen(session, f"export PATH={shlex.quote(tool_path())}; set -o pipefail; {monitor}", dry_run)
+    if not dry_run:
+        time.sleep(0.5)
+        if not any(s.index == session.index for s in find_sessions()):
+            raise RuntimeError(f'{session.name}: logger screen exited after upload')
+        print(f'{session.name}: upload succeeded; logger screen alive (serial reception not yet verified)')
 
 
 def discover_indices() -> list[int]:
@@ -158,7 +166,7 @@ def build_firmware(project: Path, dry_run: bool) -> None:
     env = os.environ.copy()
     env["PATH"] = tool_path()
     subprocess.run(command, check=True, env=env)
-    print("ESP32 firmware build completed; starting concurrent uploads.")
+    print("ESP32 firmware build completed; starting sequential uploads.")
 
 
 def main() -> int:
@@ -190,11 +198,6 @@ def main() -> int:
         metavar="N[,N...]",
         help="USB board indices; default is every detected /dev/ttyUSBN",
     )
-    parser.add_argument(
-        "--keep-screens",
-        action="store_true",
-        help="reuse matching screen sessions instead of terminating/recreating them",
-    )
     args = parser.parse_args()
 
     indices = args.boards if args.boards is not None else discover_indices()
@@ -202,11 +205,11 @@ def main() -> int:
         print("No /dev/ttyUSBN boards found; use --boards N[,N...] to specify them.", file=sys.stderr)
         return 1
     existing = find_sessions()
-    sessions = [
-        next((session for session in existing if session.index == index),
-             UsbSession(f"esp.usb{index}", index))
-        for index in indices
-    ]
+    sessions = [UsbSession(f"esp.usb{index}", index) for index in indices]
+    if not args.dry_run:
+        for session in sessions:
+            if not Path(session.port).exists():
+                raise RuntimeError(f'Missing serial port: {session.port}')
 
     print("Boards:", ", ".join(f"{session.name}={session.port}" for session in sessions))
     esptool = find_esptool(args.esptool)
@@ -218,13 +221,16 @@ def main() -> int:
     # Build before touching any screen session. A failed build leaves the
     # existing serial monitors running.
     build_firmware(args.project.resolve(), args.dry_run)
-    if not args.keep_screens:
-        for stale in (session for session in existing if session.index in indices):
+    for session in sessions:
+        for stale in (s for s in existing if s.index == session.index):
             print(f"Stopping {stale.screen_id}")
             screen_quit(stale, args.dry_run)
         if not args.dry_run:
-            time.sleep(0.25)
-    for session in sessions:
+            deadline = time.monotonic() + 5
+            while any(s.index == session.index for s in find_sessions()):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f'{session.name}: screen did not stop')
+                time.sleep(0.1)
         deploy(
             session,
             args.project.resolve(),

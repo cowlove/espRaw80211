@@ -1287,6 +1287,13 @@ public:
         esp_task_wdt_reset();
         const uint64_t nowUsec = micros();
         if (!espNowStarted && nowUsec - startUsec >= beaconSamplingWindowUsec) {
+            // Hardware workaround: Jim observed that initializing ESP-NOW
+            // before beacon acquisition subtly reduced, and sometimes nearly
+            // eliminated, promiscuous Wi-Fi monitor callbacks. Preserve this
+            // beacon-only acquisition phase before the mux initializes Wi-Fi/
+            // ESP-NOW. The underlying driver interaction remains unproven;
+            // do not move initialization earlier without a hardware regression
+            // test measuring beacon callbacks before and after initialization.
             privMux.registerReadCallback("BRPT", [this](const uint8_t *from,
                                                          const uint8_t *data,
                                                          int length) {
