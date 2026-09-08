@@ -229,8 +229,11 @@ def main() -> int:
     if since is not None and until is not None and since > until:
         ap.error('--since must not be later than --until')
     datasets, raw, warnings = [], [], {}
-    for i in range(4):
-        path = args.log_dir / f"cat.usb{i}.out"
+    for path in sorted(args.log_dir.glob('cat.usb*.out')):
+        match = re.fullmatch(r'cat\.usb(\d+)\.out', path.name)
+        if not match:
+            continue
+        i = int(match.group(1))
         data = b''
         if path.exists():
             with path.open('rb') as stream:

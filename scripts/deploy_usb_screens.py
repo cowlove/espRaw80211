@@ -124,19 +124,26 @@ def deploy(
         print('$', shlex.join(command))
         if not dry_run:
             subprocess.run(command, check=True, env=env)
-    monitor = (
-        f"make -C {shlex.quote(str(project))} BOARD=esp32 UPLOAD_PORT={session.port} cat "
-        f"| python3 {shlex.quote(str(project / 'scripts/timestamp_serial.py'))} "
-        f"--board {shlex.quote(session.name)} --port {shlex.quote(session.port)} "
-        f"| tee -a {shlex.quote(str(project / session.logfile))}"
-    )
+    start_logger(session, project, dry_run)
+
+
+def logger_port(port: str) -> str:
+    # Many cheap adapters share serial IDs. Bind to the physical USB socket.
+    return next((str(path) for path in sorted(Path('/dev/serial/by-path').glob('*'))
+                 if path.resolve() == Path(port).resolve()), port)
+
+
+def start_logger(session: UsbSession, project: Path, dry_run: bool) -> None:
+    monitor = shlex.join(['python3', str(project / 'scripts/timestamp_serial.py'),
+                          '--board', session.name, '--port', logger_port(session.port),
+                          '--logfile', str(project / session.logfile)])
     print(f"{session.name}: {session.port} -> {session.logfile}")
     start_screen(session, f"export PATH={shlex.quote(tool_path())}; set -o pipefail; {monitor}", dry_run)
     if not dry_run:
         time.sleep(0.5)
         if not any(s.index == session.index for s in find_sessions()):
-            raise RuntimeError(f'{session.name}: logger screen exited after upload')
-        print(f'{session.name}: upload succeeded; logger screen alive (serial reception not yet verified)')
+            raise RuntimeError(f'{session.name}: logger screen exited')
+        print(f'{session.name}: logger screen alive (serial reception not yet verified)')
 
 
 def discover_indices() -> list[int]:
@@ -198,7 +205,10 @@ def main() -> int:
         metavar="N[,N...]",
         help="USB board indices; default is every detected /dev/ttyUSBN",
     )
+    parser.add_argument('--log-only', action='store_true', help='restart loggers without building or flashing')
     args = parser.parse_args()
+    if args.log_only and args.erase_flash:
+        parser.error('--log-only cannot be combined with --erase-flash')
 
     indices = args.boards if args.boards is not None else discover_indices()
     if not indices:
@@ -220,7 +230,8 @@ def main() -> int:
         print(f"Flash erase enabled; using {esptool}")
     # Build before touching any screen session. A failed build leaves the
     # existing serial monitors running.
-    build_firmware(args.project.resolve(), args.dry_run)
+    if not args.log_only:
+        build_firmware(args.project.resolve(), args.dry_run)
     for session in sessions:
         for stale in (s for s in existing if s.index == session.index):
             print(f"Stopping {stale.screen_id}")
@@ -231,6 +242,9 @@ def main() -> int:
                 if time.monotonic() >= deadline:
                     raise RuntimeError(f'{session.name}: screen did not stop')
                 time.sleep(0.1)
+        if args.log_only:
+            start_logger(session, args.project.resolve(), args.dry_run)
+            continue
         deploy(
             session,
             args.project.resolve(),
