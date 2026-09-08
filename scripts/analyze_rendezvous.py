@@ -105,14 +105,12 @@ def read_remote(host: str, path: str, tail_bytes: int) -> bytes:
         return b""
 
 
-def read_local_tail(path: Path, tail_bytes: int) -> tuple[bytes, bool]:
+def read_local_tail(path: Path, tail_bytes: int) -> bytes:
     """Read at most the requested suffix without loading the whole log."""
     size = path.stat().st_size
-    truncated = size > tail_bytes
     with path.open('rb') as stream:
         stream.seek(max(0, size - tail_bytes))
-        data = stream.read(tail_bytes)
-    return data, truncated
+        return stream.read(tail_bytes)
 
 
 def dashboard(name: str, data: bytes, limit: int) -> None:
@@ -250,19 +248,15 @@ def main() -> int:
         i = int(match.group(1))
         data = b''
         if path.exists():
-            data, truncated = read_local_tail(path, args.tail_bytes)
-        else:
-            truncated = False
-        raw.append((f'local usb{i}', data, truncated))
+            data = read_local_tail(path, args.tail_bytes)
+        raw.append((f'local usb{i}', data))
     if not args.local_only:
         for i in range(2):
             data = read_remote(args.remote_host,
                                f'{args.remote_dir}/cat.usb{i}.out', args.tail_bytes)
-            raw.append((f'miner6 usb{i}', data, len(data) >= args.tail_bytes))
-    for name, data, truncated in raw:
+            raw.append((f'miner6 usb{i}', data))
+    for name, data in raw:
         selected, notes = evidence.select(data, args.session, since, until)
-        if truncated:
-            notes.append('input byte limit reached; older history may be missing')
         warnings[name] = notes
         datasets.append((name, selected))
         for note in notes:

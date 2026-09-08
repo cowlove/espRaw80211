@@ -17,11 +17,9 @@ class AnalyzerTailTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / 'large.log'
             path.write_bytes(b'a' * 100 + b'LAST')
-            data, truncated = analyzer.read_local_tail(path, 16)
-            self.assertTrue(truncated)
+            data = analyzer.read_local_tail(path, 16)
             self.assertEqual(data, b'a' * 12 + b'LAST')
-            data, truncated = analyzer.read_local_tail(path, 1000)
-            self.assertFalse(truncated)
+            data = analyzer.read_local_tail(path, 1000)
             self.assertEqual(data, path.read_bytes())
 
 
