@@ -9,6 +9,8 @@ import subprocess
 import sys
 import json
 import shlex
+import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 import rendezvous_evidence as evidence
@@ -199,6 +201,29 @@ def current_dashboard(name: str, data: bytes) -> None:
     print(f"{name:<12} current={status:<18} cycles={len(active):2d}  consensus={latest.consensus:<5}  home={latest.home} listeners={latest.listeners}")
 
 
+def human_age(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    if days:
+        return f"{days}d{hours}h"
+    if hours:
+        return f"{hours}h{minutes}m"
+    if minutes:
+        return f"{minutes}m{seconds}s"
+    return f"{seconds}s"
+
+
+def initial_qualification(data: bytes, required: int) -> float | None:
+    """First timestamped healthy required-listener cycle in retained input."""
+    for cycle in evidence.parse_evidence(data)[0]:
+        if (cycle.wall is not None and cycle.health == 'healthy' and
+                cycle.listeners is not None and cycle.listeners >= required):
+            return cycle.wall
+    return None
+
+
 def rendezvous_dashboard(name: str, data: bytes) -> bool:
     """Apply an ARTIFICIAL test oracle, not a discoverable global membership."""
     required = swarm_board_count()
@@ -210,7 +235,11 @@ def rendezvous_dashboard(name: str, data: bytes) -> bool:
         return False
     latest = cycles[-1]
     state = "QUALIFIED" if qualified and qualified[-1] is latest else "not-qualified"
-    print(f"{name:<12} rendezvous={state:<12} artificial-test-board-count={required} qualified={len(qualified):3d}  latest-home={latest.home}  latest-listeners={latest.listeners}  latest-exchange={'healthy' if latest.healthy else 'incomplete'}")
+    first = initial_qualification(data, required)
+    first_text = "none-in-retained-tail" if first is None else (
+        f"{datetime.fromtimestamp(first).astimezone().isoformat(timespec='seconds')} "
+        f"age={human_age(time.time()-first)}")
+    print(f"{name:<12} rendezvous={state:<12} artificial-test-board-count={required} qualified={len(qualified):3d}  latest-home={latest.home}  latest-listeners={latest.listeners}  latest-exchange={'healthy' if latest.healthy else 'incomplete'}  first-7/7={first_text}")
     return state == "QUALIFIED"
 
 

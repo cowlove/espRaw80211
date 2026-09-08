@@ -29,3 +29,13 @@ class SwarmOracleTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertFalse(analyzer.rendezvous_dashboard('one USB', data(swarm_board_count()-1)))
             self.assertTrue(analyzer.rendezvous_dashboard('one USB', data(swarm_board_count())))
+
+    def test_initial_qualification_and_age(self):
+        required = swarm_board_count()
+        data = (f'2026-09-08T12:00:00-07:00 host_mono_ns=1 board=usb0 port=/dev/x session=s | logger-session x\n'
+                f'2026-09-08T12:01:00-07:00 host_mono_ns=2 board=usb0 port=/dev/x session=s | 00005.0 ESP-NOW exchange phase started\n'
+                f'2026-09-08T12:01:01-07:00 host_mono_ns=3 board=usb0 port=/dev/x session=s | 00010.0 gossip home exchange healthy home abc listeners {required}\n'
+                f'2026-09-08T12:01:02-07:00 host_mono_ns=4 board=usb0 port=/dev/x session=s | 00010.1 deep sleep 20 sec\n').encode()
+        first = analyzer.initial_qualification(data, required)
+        self.assertEqual(first, analyzer.evidence.timestamp('2026-09-08T12:01:00-07:00'))
+        self.assertEqual(analyzer.human_age(3661), '1h1m')
