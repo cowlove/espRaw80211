@@ -5,6 +5,8 @@
 #include "beaconReport.h"
 #include "originEpoch.h"
 #include "macIdentity.h"
+#include "rendezvousPlanner.h"
+#include "rendezvousExecutor.h"
 #ifndef ESP32
 #error Only the ESP32 is supported
 #endif
@@ -247,6 +249,23 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     SPIFFSVariable<int> spiffsCurrentRep{"/currentRep", 0};
     SPIFFSVariable<uint32_t> spiffsClaimGeneration{"/claimGen", 0};
     SPIFFSVariable<uint32_t> spiffsIncarnation{"/incarnation", 0};
+    SPIFFSVariable<uint64_t> spiffsRoundElapsed{"/roundElapsed7", 0};
+    SPIFFSVariable<uint32_t> spiffsExchangeSequence{"/exchangeSeq7", 0};
+    SPIFFSVariable<uint64_t> spiffsScoutCursor{"/scoutCursor7", 0};
+    SPIFFSVariable<uint32_t> spiffsLastScoutRound{"/lastScout7", 0};
+    SPIFFSVariable<int> spiffsRoundHealthy{"/roundHealthy7", 0};
+    SPIFFSVariable<uint64_t> spiffsRoundHome{"/roundHome7", 0};
+    RendezvousExecutor::RoundClock roundClock;
+    RendezvousPlanner::Plan<4> executionPlan{1000000};
+    RendezvousExecutor::Coverage coverage[4] = {};
+    size_t executionInterval = 0;
+    bool executionPlanned = false, exchangeActive = false;
+    uint32_t exchangeSequence = 0;
+    uint64_t plannedHome = 0;
+    uint64_t plannedPeriod = 0;
+    uint64_t nextPlanUsec = 0;
+    uint32_t intervalRawStart = 0, intervalOkStart = 0, intervalFailStart = 0;
+    uint32_t coverageFailures[4] = {};
     SPIFFSVariable<string> spiffsClaims{"/claims6", ""};
     SPIFFSVariable<string> spiffsAssociations{"/associations6", ""};
     SPIFFSVariable<string> spiffsOrigins{"/origins6", ""};
@@ -317,6 +336,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         memset(originEpochs, 0, sizeof(originEpochs));
         spiffsClaimGeneration = (uint32_t)0;
         spiffsIncarnation = (uint32_t)0;
+        spiffsRoundElapsed = (uint64_t)0;
+        spiffsExchangeSequence = (uint32_t)0;
+        spiffsLastScoutRound = (uint32_t)0;
+        spiffsRoundHealthy = 0;
+        spiffsRoundHome = (uint64_t)0;
         spiffsScoutPhase = 0;
         spiffsScoutBeacon = (uint64_t)0;
         spiffsProposalBeacon = (uint64_t)0;
@@ -502,7 +526,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 &age, &epoch, &consumed);
             if (fields != 5 || consumed <= 0) break;
             // One persisted record spans one completed sleep/wake boundary.
-            const uint64_t aged = (uint64_t)age + 1;
+            const uint64_t aged = (uint64_t)age;
             if (epochMatches(origin, epoch)) associations[slot++] = {
                 (uint64_t)origin, (uint64_t)selected,
                 (uint32_t)generation,
@@ -930,7 +954,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         }
         BeaconReportHeader header;
         memcpy(&header, data, sizeof(header));
-        if (header.version != 6) {
+        if (header.version != 7) {
             if (peerSlot >= 0) reportSenderBadVersion[peerSlot]++;
             return;
         }
@@ -943,13 +967,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             !acceptOrigin(header.senderMac, header.incarnation, true)) return;
         // One sample per peer per exchange keeps serial output bounded.
         if (peerSlot >= 0 && reportSenderValid[peerSlot] == 0)
-        out("report-clock-rx sender %012llx incarnation %08x wake %u packet %u local-rx %llu bssid %012llx clock-ms-low %u start-delta-ms %d planned-end-delta-ms %d valid %u",
+        out("report-clock-rx sender %012llx incarnation %08x wake %u packet %u local-rx %llu bssid %012llx clock-ms-low %u start-delta-ms %d planned-end-delta-ms %d valid %u exchange %u",
             (unsigned long long)header.senderMac, header.incarnation,
             header.wakeGeneration, header.packetSequence,
             (unsigned long long)reportLocalRx,
             (unsigned long long)reportClockBssid(header), header.clockMsLow,
             (int)header.exchangeStartDeltaMs, (int)header.plannedEndDeltaMs,
-            header.timingValid == 1 ? 1U : 0U);
+            header.timingValid == 1 ? 1U : 0U, header.exchangeSequence);
         const bool refreshed = mergeAssociation(header.senderMac, header.selectedBeacon,
                          header.wakeGeneration, 0, true, header.incarnation);
         if (peerSlot >= 0 && refreshed) reportSenderAssociationRefresh[peerSlot]++;
@@ -1090,12 +1114,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         mergeAssociation(deviceMac, spiffsBeacon.read(), wakeGeneration,
                          0, true, incarnation);
         BeaconReportHeader header = {};
-        header.version = 6;
+        header.version = 7;
         header.senderMac = deviceMac;
         header.selectedBeacon = spiffsBeacon.read();
         header.wakeGeneration = wakeGeneration;
         header.packetSequence = reportSequence++;
         header.incarnation = incarnation;
+        header.exchangeSequence = exchangeSequence;
         // Advertise the actual target observation, never substitute home for
         // an unobserved scout target. Missing or out-of-range timing is invalid.
         for (const BeaconInfo &info : packetLog) {
@@ -1168,6 +1193,271 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         const bool txHealthy = reportTxCount >= 20 && successes >= 20 &&
             failures <= 5;
         return txHealthy && reportValidRxCount >= 3 && reportSenderCount > 0;
+    }
+
+    void advanceRoundClock(uint64_t now) {
+        const uint64_t elapsed = roundClock.tick(now, defaultRendezvousUsec);
+        if (!elapsed) return;
+        // Finalize exactly once per elapsed logical round, even if continuous
+        // awake execution or several sleeps occurred within that round.
+        const bool qualified = spiffsRoundHealthy.read() &&
+            spiffsRoundHome.read() == spiffsBeacon.read();
+        spiffsRoundHealthy = 0;
+        for (uint64_t i = 0; i < elapsed; ++i) {
+            maybeResetAfterStableReunion(spiffsBeacon.read(), i == 0 && qualified);
+            if (!spiffsIncarnation.read()) return;
+        }
+        for (BeaconAssociation &a : associations)
+            if (a.originMac) a.ageCycles = RendezvousExecutor::age(a.ageCycles, elapsed);
+        // Incarnation rollover remains vanishingly rare; clear this origin's
+        // evidence through the normal direct-origin transition on wrap.
+        if (elapsed > UINT32_MAX - wakeGeneration) {
+#ifdef CSIM
+            incarnation = (uint32_t)rand();
+#else
+            incarnation = esp_random();
+#endif
+            if (!incarnation) incarnation = 1;
+            spiffsIncarnation = incarnation;
+            wakeGeneration = 1;
+            acceptOrigin(deviceMac, incarnation, true);
+        } else wakeGeneration += (uint32_t)elapsed;
+        spiffsClaimGeneration = wakeGeneration;
+        out("logical-round generation %u elapsed %llu", wakeGeneration,
+            (unsigned long long)elapsed);
+    }
+
+    void resetIntervalStats() {
+        reportSequence = 0;
+        reportTxCount = reportRxCount = reportRxClaimCount = reportValidRxCount = 0;
+        reportBadLength = epochRejected = 0;
+        associationMergeAttempts = associationMergeAccepted = 0;
+        associationMergeInvalid = associationMergeOlder = 0;
+        associationMergeNotFresher = associationMergeFull = 0;
+        memset(reportSenders, 0, sizeof(reportSenders));
+        memset(reportSenderRadioFrom, 0, sizeof(reportSenderRadioFrom));
+        memset(reportSenderRaw, 0, sizeof(reportSenderRaw));
+        memset(reportSenderValid, 0, sizeof(reportSenderValid));
+        memset(reportSenderFirstUsec, 0, sizeof(reportSenderFirstUsec));
+        memset(reportSenderLastUsec, 0, sizeof(reportSenderLastUsec));
+        memset(reportSenderShort, 0, sizeof(reportSenderShort));
+        memset(reportSenderBadVersion, 0, sizeof(reportSenderBadVersion));
+        memset(reportSenderAssociationRefresh, 0, sizeof(reportSenderAssociationRefresh));
+        memset(reportSenderClaimEntries, 0, sizeof(reportSenderClaimEntries));
+        memset(reportSenderRadioMismatch, 0, sizeof(reportSenderRadioMismatch));
+        reportSenderCount = 0;
+        intervalRawStart = privMux.getReceiveCallbacks();
+        intervalOkStart = privMux.getSendSuccesses();
+        intervalFailStart = privMux.getSendFailures();
+    }
+
+    const BeaconInfo *freshTiming(uint64_t bssid, uint64_t now) const {
+        for (const BeaconInfo &info : packetLog)
+            if (info.ssid == bssid && info.count && now >= info.seen2 &&
+                now-info.seen2 <= beaconSamplingWindowUsec) return &info;
+        return nullptr;
+    }
+
+    bool makeExecutionPlan(uint64_t now) {
+        uint64_t home = spiffsBeacon.read();
+        if (!home) {
+            const int best = randomStartupBeaconIndex();
+            if (!packetLog[best].count || !packetLog[best].ssid) return false;
+            home = packetLog[best].ssid;
+            spiffsBeacon = home;
+        }
+        const BeaconInfo *timing = freshTiming(home, now);
+        if (!timing) return false; // stay awake acquiring home, never substitute a scout
+        executionPlan = RendezvousPlanner::Plan<4>(1000000);
+        const uint64_t period = defaultRendezvousUsec;
+        RendezvousPlanner::Appointment first, second, scout;
+        if (!RendezvousPlanner::nextAppointment(home, timing->ts, timing->seen2,
+            now, period, beaconSamplingWindowUsec, exchangeWindowUsec, true, first) ||
+            !RendezvousPlanner::nextAppointment(home, timing->ts, timing->seen2,
+            first.end, period, beaconSamplingWindowUsec, exchangeWindowUsec, true, second) ||
+            !executionPlan.addHome(first) || !executionPlan.addHome(second)) return false;
+        if (wakeGeneration - spiffsLastScoutRound.read() >= scoutIntervalWakes) {
+            uint64_t candidates[packetLogSize];
+            size_t count = 0;
+            for (const BeaconInfo &info : packetLog)
+                if (info.ssid && info.rssi >= reportMinRssi &&
+                    info.count >= minimumCandidatePackets && freshTiming(info.ssid, now))
+                    candidates[count++] = info.ssid;
+            uint64_t selected = spiffsScoutBeacon.read();
+            bool eligible = false;
+            for (size_t i = 0; i < count; ++i)
+                if (candidates[i] == selected && selected != home) eligible = true;
+            if (!eligible) selected = RendezvousPlanner::chooseScout(candidates, count,
+                home, spiffsScoutCursor.read());
+            const BeaconInfo *other = freshTiming(selected, now);
+            if (other && RendezvousPlanner::nextAppointment(selected, other->ts,
+                other->seen2, now, period, beaconSamplingWindowUsec,
+                exchangeWindowUsec, false, scout)) {
+                if (executionPlan.addScout(scout, exchangeWindowUsec + 2000000))
+                    spiffsScoutBeacon = selected;
+                else {
+                    spiffsScoutCursor = selected;
+                    spiffsScoutBeacon = (uint64_t)0;
+                    spiffsLastScoutRound = wakeGeneration;
+                    out("scout deferred budget target %012llx", (unsigned long long)selected);
+                }
+            }
+        }
+        for (auto &state : coverage) state = {};
+        executionInterval = 0;
+        plannedHome = home;
+        plannedPeriod = period;
+        executionPlanned = true;
+        out("interval-plan home %012llx appointments %u intervals %u awake-usec %llu",
+            (unsigned long long)home, (unsigned)executionPlan.appointmentCount(),
+            (unsigned)executionPlan.intervalCount(), (unsigned long long)executionPlan.awakeUsec());
+        return true;
+    }
+
+    void sleepForExecutor(uint64_t duration) {
+        advanceRoundClock(micros());
+        if (!spiffsIncarnation.read()) return;
+        saveClaims(); saveAssociations(); saveOrigins();
+        out("deep sleep %.3f sec executor", duration / 1000000.0);
+        fflush(stdout);
+#ifndef CSIM
+        uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
+#endif
+        // Account for save/log time before deciding whether sleep is still safe.
+        const uint64_t now = micros();
+        duration = executionPlan.sleepUntilNext(now, beaconSamplingWindowUsec + 500000);
+        if (duration < 1000000) return;
+        spiffsRoundElapsed = roundClock.remainder + (now-roundClock.last) + duration;
+        spiffsSleepTime = duration;
+        spiffsClaimGeneration = wakeGeneration;
+        beaconCapture.stop();
+        esp_sleep_enable_timer_wakeup(duration);
+        esp_deep_sleep_start();
+    }
+
+    void intervalExecutorLoop(uint64_t now) {
+        advanceRoundClock(now);
+        if (!spiffsIncarnation.read()) {
+            saveClaims(); saveAssociations(); saveOrigins();
+            beaconCapture.stop();
+            esp_sleep_enable_timer_wakeup(1000);
+            esp_deep_sleep_start();
+            return;
+        }
+        if (now-startUsec < beaconSamplingWindowUsec) { delay(1); return; }
+        if (!espNowStarted) {
+            // Preserve beacon-only acquisition before the first ESP-NOW init:
+            // Jim observed early init suppressing promiscuous beacon callbacks.
+            // Keep the initialized radio across merged/nearby appointments.
+            privMux.registerReadCallback("BRPT", [this](const uint8_t *from,
+                const uint8_t *data, int length) { onReport(from, data, length); });
+            espNowStarted = true;
+            return;
+        }
+        if (!executionPlanned) {
+            if (now < nextPlanUsec) { delay(1); return; }
+            if (!makeExecutionPlan(now)) {
+                nextPlanUsec = now + 1000000;
+                out("interval-plan waiting for fresh home timing");
+                delay(1); return;
+            }
+        }
+        if (executionInterval >= executionPlan.intervalCount()) {
+            executionPlanned = false;
+            return;
+        }
+        const auto &interval = executionPlan.interval(executionInterval);
+        if (!exchangeActive && now < interval.start) {
+            const uint64_t sleep = executionPlan.sleepUntilNext(now, beaconSamplingWindowUsec+500000);
+            if (sleep >= 1000000) sleepForExecutor(sleep);
+            delay(1); return;
+        }
+        if (!exchangeActive) {
+            resetIntervalStats();
+            exchangeSequence = spiffsExchangeSequence.read() + 1;
+            spiffsExchangeSequence = exchangeSequence;
+            targetBeacon = plannedHome;
+            bool homePresent = false;
+            for (size_t i = 0; i < executionPlan.appointmentCount(); ++i) {
+                if (!(interval.appointments & (1ULL << i))) continue;
+                const auto &a = executionPlan.appointment(i);
+                if (a.home) homePresent = true;
+                else targetBeacon = a.bssid;
+            }
+            if (homePresent) targetBeacon = plannedHome;
+            espNowStartUsec = now;
+            espNowEndUsec = interval.end;
+            nextReportUsec = now;
+            exchangeActive = true;
+            out("report-identity incarnation %08x wake %u wire-version 7 exchange %u",
+                incarnation, wakeGeneration, exchangeSequence);
+            out("ESP-NOW exchange phase started interval %u planned %llu-%llu",
+                exchangeSequence, (unsigned long long)interval.start, (unsigned long long)interval.end);
+        }
+        for (size_t i = 0; i < executionPlan.appointmentCount(); ++i) {
+            if (!(interval.appointments & (1ULL << i))) continue;
+            const auto &a = executionPlan.appointment(i);
+            auto &state = coverage[i];
+            if (!state.started && now >= a.start) {
+                state.begin(now, a.start, a.late, privMux.getSendSuccesses(), reportValidRxCount, 20000);
+                coverageFailures[i] = privMux.getSendFailures();
+            }
+            if (state.started && !state.finished && now >= a.end) {
+                state.finished = true;
+                const bool healthy = state.healthy(privMux.getSendSuccesses(), reportValidRxCount) &&
+                    privMux.getSendFailures()-coverageFailures[i] <= 5;
+                out("appointment complete exchange %u kind %s target %012llx full %u healthy %u",
+                    exchangeSequence, a.home ? "home" : "scout",
+                    (unsigned long long)a.bssid, state.full ? 1U : 0U, healthy ? 1U : 0U);
+                if (a.home && spiffsBeacon.read() == a.bssid) {
+                    if (healthy) advanceProposal(a.bssid, reportOnlyCandidate(a.bssid));
+                    else { spiffsProposalBeacon = 0; spiffsProposalAge = 0; }
+                    if (healthy && state.full) {
+                        spiffsRoundHealthy = 1;
+                        spiffsRoundHome = a.bssid;
+                    }
+                } else if (!a.home) {
+                    spiffsScoutCursor = a.bssid;
+                    spiffsScoutBeacon = (uint64_t)0;
+                    spiffsLastScoutRound = wakeGeneration;
+                }
+            }
+        }
+        if (now < interval.end) {
+            if (now >= nextReportUsec) {
+                publishReport();
+                nextReportUsec = now + reportPeriodUsec;
+            }
+            delay(1); return;
+        }
+        const BeaconInfo *timing = freshTiming(targetBeacon, now);
+        uint64_t projectedStart = 0, projectedEnd = 0;
+        if (timing && projectBeaconTsf(timing->ts, timing->seen2, espNowStartUsec, projectedStart) &&
+            projectBeaconTsf(timing->ts, timing->seen2, espNowEndUsec, projectedEnd))
+            out("beacon-clock target %012llx tsf-packet %llu exchange %llu-%llu",
+                (unsigned long long)targetBeacon, (unsigned long long)timing->ts,
+                (unsigned long long)projectedStart, (unsigned long long)projectedEnd);
+        const uint64_t home = spiffsBeacon.read();
+        const bool transportHealthy = reportValidRxCount >= 3 &&
+            privMux.getSendSuccesses()-intervalOkStart >= 20;
+        out("gossip interval exchange %s home %012llx listeners %u rawrx %u rx %u valid %u peers %u",
+            transportHealthy ? "healthy" : "incomplete", (unsigned long long)home,
+            (unsigned)listenerCount(home), privMux.getReceiveCallbacks()-intervalRawStart,
+            reportRxCount, reportValidRxCount, reportSenderCount);
+        dumpExchangePeers();
+        dumpAssociationTable(home);
+        out("exchange complete interval %u", exchangeSequence);
+        exchangeActive = false;
+        ++executionInterval;
+        if (home != plannedHome || !spiffsIncarnation.read()) executionPlanned = false;
+        if (!spiffsIncarnation.read()) {
+            // Test reset changes incarnation in the next setup; restart through
+            // deep sleep without pretending a normal appointment caused it.
+            saveClaims(); saveAssociations(); saveOrigins();
+            beaconCapture.stop();
+            esp_sleep_enable_timer_wakeup(1000);
+            esp_deep_sleep_start();
+        }
     }
 
     void configureBeaconRadio() {
@@ -1337,7 +1627,9 @@ public:
         loadOrigins();
         loadClaims();
         loadAssociations();
-        wakeGeneration = spiffsClaimGeneration.read() + 1;
+        wakeGeneration = spiffsClaimGeneration.read();
+        if (!wakeGeneration) wakeGeneration = 1;
+        roundClock = {spiffsRoundElapsed.read(), micros()};
         incarnation = spiffsIncarnation.read();
         if (incarnation == 0 || wakeGeneration == 0) {
 #ifdef CSIM
@@ -1351,30 +1643,12 @@ public:
         }
         spiffsClaimGeneration = wakeGeneration;
         acceptOrigin(deviceMac, incarnation, true);
-        out("report-identity incarnation %08x wake %u wire-version 6 max-packet-bytes 176",
+        out("report-identity incarnation %08x wake %u wire-version 7 max-packet-bytes 180",
             incarnation, wakeGeneration);
         const uint64_t homeBeacon = spiffsBeacon.read();
         targetBeacon = homeBeacon;
         scoutWake = false;
         scoutRendezvousWake = false;
-        if (spiffsScoutPhase.read() == 1 &&
-            spiffsScoutBeacon.read() != 0) {
-            targetBeacon = spiffsScoutBeacon.read();
-            scoutWake = true;
-            scoutRendezvousWake = true;
-            spiffsScoutPhase = 0;
-        } else if (homeBeacon != 0 &&
-                   wakeGeneration % scoutIntervalWakes == 0) {
-            const uint64_t scoutBeacon = chooseScoutBeacon(homeBeacon);
-            if (scoutBeacon != 0) {
-                targetBeacon = scoutBeacon;
-                scoutWake = true;
-                spiffsScoutBeacon = scoutBeacon;
-                // Revisit on the following wake, after this wake aligns the
-                // sleep deadline to the scout beacon's clock.
-                spiffsScoutPhase = 1;
-            }
-        }
 #ifdef CSIM
         const double setupSeconds =
             (sim().bootTimeUsec + micros()) / 1000000.0;
@@ -1409,6 +1683,8 @@ public:
         // first peer heard.
         privMux.alwaysBroadcast = true;
         startOneShotCapture();
+        executionPlanned = exchangeActive = false;
+        nextPlanUsec = 0;
     }
 
 #ifdef CSIM
@@ -1422,213 +1698,8 @@ public:
         loopCount++;
         esp_task_wdt_reset();
         const uint64_t nowUsec = micros();
-        if (!espNowStarted && nowUsec - startUsec >= beaconSamplingWindowUsec) {
-            // Hardware workaround: Jim observed that initializing ESP-NOW
-            // before beacon acquisition subtly reduced, and sometimes nearly
-            // eliminated, promiscuous Wi-Fi monitor callbacks. Preserve this
-            // beacon-only acquisition phase before the mux initializes Wi-Fi/
-            // ESP-NOW. The underlying driver interaction remains unproven;
-            // do not move initialization earlier without a hardware regression
-            // test measuring beacon callbacks before and after initialization.
-            privMux.registerReadCallback("BRPT", [this](const uint8_t *from,
-                                                         const uint8_t *data,
-                                                         int length) {
-                onReport(from, data, length);
-            });
-            espNowStarted = true;
-            // Use the loop timestamp captured above; sampling micros() here
-            // would make nowUsec - espNowStartUsec wrap as an unsigned value
-            // on the transition iteration.
-            espNowStartUsec = nowUsec;
-            espNowEndUsec = nowUsec + exchangeWindowUsec;
-            nextReportUsec = espNowStartUsec;
-            out("ESP-NOW exchange phase started after beacon-only survey");
-            delay(1);
-            return;
-        }
-        if (!espNowStarted || nowUsec < espNowEndUsec) {
-            if (espNowStarted && nowUsec >= nextReportUsec) {
-                publishReport();
-                nextReportUsec = nowUsec + reportPeriodUsec;
-            }
-            delay(1);
-            return;
-        }
-
-        BeaconInfo result = {};
-        BeaconInfo *beacon = nullptr;
-        for (BeaconInfo &info : packetLog) {
-            if (info.ssid == targetBeacon && info.count != 0) {
-                result = info;
-                beacon = &result;
-                break;
-            }
-        }
-        if (result.count == 0) {
-            out("Target beacon not received in broad scan, picking best observed beacon");
-            const bool uninitializedStartup = spiffsBeacon.read() == 0;
-            const int best = uninitializedStartup ?
-                randomStartupBeaconIndex() : bestBeaconIndex();
-            out("best beacon: %02d %012llx %3d %6d %016llx %016llx", best,
-                (unsigned long long)packetLog[best].ssid, packetLog[best].rssi,
-                packetLog[best].count, (unsigned long long)packetLog[best].seen,
-                (unsigned long long)packetLog[best].seen2);
-            beacon = &packetLog[best];
-            if (!scoutWake) spiffsBeacon = beacon->ssid;
-        }
-
-        if (resetReason() != 5) {
-            spiffsCurrentGoal = defaultRendezvousUsec;
-            spiffsCurrentRep = 0;
-        }
-        uint64_t goal = spiffsCurrentGoal;
-        if (goal == 0) {
-            goal = defaultRendezvousUsec;
-            spiffsCurrentGoal = goal;
-            spiffsCurrentRep = 0;
-        }
-        const uint64_t packetRxLocalUsec = beacon->seen2;
-        const uint64_t packetRxTime = packetRxLocalUsec - startUsec;
-        int beaconDistance = (int)(beacon->ts % goal);
-        if (beaconDistance > (int)(goal / 2)) beaconDistance -= goal;
-        int espDistance = (int)(packetRxTime % goal);
-        if (espDistance > (int)(goal / 2)) espDistance -= goal;
-        const int usecLate = beaconDistance - espDistance;
-        const uint64_t previousSleep = spiffsSleepTime.read();
-        const float percentLate = previousSleep ? abs(100.0 * usecLate / previousSleep) : 0.0;
-
-        // Project the local ESP-NOW window onto the tracked beacon's TSF
-        // clock. This makes two boards' logs directly comparable when they
-        // are visiting the same beacon, even though their local micros()
-        // clocks and serial log timestamps are unrelated.
-        uint64_t beaconExchangeStart = 0, beaconExchangeEnd = 0;
-        const bool projectionValid = beacon->count != 0 &&
-            projectBeaconTsf(beacon->ts, packetRxLocalUsec,
-                             espNowStartUsec, beaconExchangeStart) &&
-            projectBeaconTsf(beacon->ts, packetRxLocalUsec,
-                             espNowEndUsec, beaconExchangeEnd);
-        out("beacon-clock-observation target %012llx tsf %llu local-rx %llu exchange-start-local %llu planned-end-local %llu completion-local %llu valid %u",
-            (unsigned long long)beacon->ssid, (unsigned long long)beacon->ts,
-            (unsigned long long)packetRxLocalUsec,
-            (unsigned long long)espNowStartUsec,
-            (unsigned long long)espNowEndUsec,
-            (unsigned long long)nowUsec, projectionValid ? 1U : 0U);
-        if (projectionValid) {
-            const uint64_t beaconCycle = beaconExchangeStart / goal;
-            const uint64_t beaconCycleStart = beaconCycle * goal;
-            const uint64_t beaconCycleStop = beaconCycleStart + goal;
-            // Half-open intervals ending at the boundary do not cross it.
-            const unsigned crossesBoundary = beaconExchangeEnd > beaconCycleStop ? 1U : 0U;
-            out("beacon-clock target %012llx tsf-packet %llu exchange %llu-%llu cycle %llu start %llu stop %llu crosses-boundary %u",
-                (unsigned long long)beacon->ssid,
-                (unsigned long long)beacon->ts,
-                (unsigned long long)beaconExchangeStart,
-                (unsigned long long)beaconExchangeEnd,
-                (unsigned long long)beaconCycle,
-                (unsigned long long)beaconCycleStart,
-                (unsigned long long)beaconCycleStop,
-                crossesBoundary);
-        }
-
-        if (resetReason() == 5 || loopCount > 1) {
-            out("slept %lld (%.1fs) rssi %d goal %.2fs rep %d beacon offset %d esp offset %d difference %d late (%.3f%%) scale %f",
-                (long long)previousSleep, previousSleep / 1000000.0, beacon->rssi,
-                goal / 1000000.0, spiffsCurrentRep.read(), beaconDistance,
-                espDistance, usecLate, percentLate, spiffsScale.read());
-            if (previousSleep > 0) {
-                spiffsScale = spiffsScale - (1.0 * usecLate / previousSleep) * 0.3;
-                spiffsScale = min(1.1F, max(0.9F, spiffsScale.read()));
-            }
-            spiffsCurrentRep = spiffsCurrentRep + 1;
-        } else {
-            spiffsScale = 1.004;
-        }
-
-        goal = spiffsCurrentGoal;
-        uint64_t timeToGoal = goal - (beacon->ts % goal);
-        if (timeToGoal % goal < goal / 2) timeToGoal += goal;
-        uint64_t awakeSincePacket = micros() - startUsec - packetRxTime;
-        while (timeToGoal <= awakeSincePacket) timeToGoal += goal;
-        uint64_t sleepUsec =
-            (timeToGoal - awakeSincePacket) * spiffsScale;
-        const uint64_t homeBssid = spiffsBeacon.read();
-        // The older "late" diagnostic is relative to the beacon that
-        // anchored this sleep calculation. During a scout wake that may not
-        // be the persisted home beacon, so record both identities and the
-        // complete deadline relationship for offline analysis.
-        out("rendezvous timing mode %s home %012llx target %012llx anchor %012llx target-hit %u beacon-rx-usec %llu exchange-usec %llu-%llu awake-after-beacon-usec %llu deadline-usec %llu sleep-usec %llu late-usec %d late-pct %.3f",
-            scoutRendezvousWake ? "scout-rendezvous" :
-            (scoutWake ? "scout-acquire" : "home"),
-            (unsigned long long)homeBssid,
-            (unsigned long long)targetBeacon,
-            (unsigned long long)beacon->ssid,
-            (unsigned)targetHits,
-            (unsigned long long)packetRxTime,
-            (unsigned long long)espNowStartUsec,
-            (unsigned long long)espNowEndUsec,
-            (unsigned long long)awakeSincePacket,
-            (unsigned long long)timeToGoal,
-            (unsigned long long)sleepUsec,
-            usecLate, percentLate);
-        const bool healthyExchange = exchangeHealthy();
-        const uint64_t candidateBssid = healthyExchange ?
-            reportOnlyCandidate(homeBssid) : homeBssid;
-        bool switched = false;
-        if (healthyExchange)
-            switched = advanceProposal(homeBssid, candidateBssid);
-        else {
-            // Proposal rounds must be consecutive and healthy. Treat packet
-            // loss as delayed convergence, never as evidence to move.
-            spiffsProposalBeacon = 0;
-            spiffsProposalAge = 0;
-        }
-        out("gossip %s exchange %s claims %d home %012llx listeners %d visibility current %d retained %d proposal %012llx listeners %d visibility current %d retained %d age %d espnow tx %u ok %u fail %u busy %u rawrx %u rx %u valid %u peers %u claims %u scan accepted %u target %u parse-reject %u channel %d exchange-usec %llu-%llu last-rx %012llx%s",
-            scoutRendezvousWake ? "scout-rendezvous" :
-            (scoutWake ? "scout-acquire" : "home"),
-            healthyExchange ? "healthy" : "incomplete",
-            (int)claimCount(), (unsigned long long)homeBssid,
-            (int)listenerCount(homeBssid),
-            (int)currentSupporterCount(homeBssid),
-            (int)supporterCount(homeBssid),
-            (unsigned long long)candidateBssid,
-            (int)listenerCount(candidateBssid),
-            (int)currentSupporterCount(candidateBssid),
-            (int)supporterCount(candidateBssid), spiffsProposalAge.read(),
-            reportTxCount, privMux.getSendSuccesses(),
-            privMux.getSendFailures(), privMux.getSendBusyDrops(),
-            privMux.getReceiveCallbacks(),
-            reportRxCount, reportValidRxCount, reportSenderCount,
-            reportRxClaimCount, scanAccepted, targetHits,
-            scanParseRejects,
-            wifiChannel,
-            (unsigned long long)espNowStartUsec,
-            (unsigned long long)espNowEndUsec,
-            (unsigned long long)privMux.getLastReceiveMac(),
-            switched ? " SWITCH" : "");
-        dumpExchangePeers();
-        dumpAssociationTable(homeBssid);
-        dumpDeviceBeaconMatrix();
-        out("deep sleep %.1f sec, goal %.1f scale %f", sleepUsec / 1000000.0,
-            goal / 1000000.0, spiffsScale.read());
-        fflush(stdout);
-#ifndef CSIM
-        uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
-#endif
-        awakeSincePacket = micros() - startUsec - packetRxTime;
-        while (timeToGoal <= awakeSincePacket) timeToGoal += goal;
-        sleepUsec = (timeToGoal - awakeSincePacket) * spiffsScale;
-        spiffsSleepTime = sleepUsec;
-        // Ensure observations made late in this wake are advertised at least
-        // once before sleeping. Periodic reports alone can otherwise miss a
-        // one-shot capture followed immediately by deep sleep.
-        publishReport();
-        maybeResetAfterStableReunion(homeBssid, healthyExchange);
-        saveClaims();
-        saveAssociations();
-        saveOrigins();
-        beaconCapture.stop();
-        esp_sleep_enable_timer_wakeup(sleepUsec);
-        esp_deep_sleep_start();
+        intervalExecutorLoop(nowUsec);
+        return;
     }
 };
 

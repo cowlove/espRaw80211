@@ -15,24 +15,25 @@ class BeaconReportTests(unittest.TestCase):
 #include "beaconReport.h"
 int main() {
     BeaconReportHeader h = {};
-    h.version = 6;
+    h.version = 7;
     h.incarnation = 0x12345678;
     h.claimCount = 2;
     h.associationCount = 3;
     assert(sizeof(h) + 2*sizeof(BeaconClaimEntry) +
-           3*sizeof(BeaconAssociationEntry) + 4 == 176);
-    assert(validReportLength(h, 172));
-    assert(!validReportLength(h, 171));
-    assert(!validReportLength(h, 173));
+           3*sizeof(BeaconAssociationEntry) + 4 == 180);
+    assert(validReportLength(h, 176));
+    assert(!validReportLength(h, 175));
+    assert(!validReportLength(h, 177));
     h.claimCount = 3;
     assert(!validReportLength(h, 216));
     h.claimCount = 2;
     h.associationCount = 4;
     assert(!validReportLength(h, 217));
     h.associationCount = 3;
-    h.version = 5;
-    assert(!validReportLength(h, 172));
     h.version = 6;
+    assert(!validReportLength(h, 176));
+    h.version = 7;
+    h.exchangeSequence = 42;
     assert(setReportTiming(h, 0x60a4b792da8aULL, 100000000,
                            7000000, 6000000, 11000000));
     assert(h.clockMsLow == 100000);
@@ -46,6 +47,7 @@ int main() {
     BeaconReportHeader copy;
     memcpy(&copy, wire, sizeof(copy));
     assert(copy.incarnation == h.incarnation);
+    assert(copy.exchangeSequence == 42);
     assert(copy.exchangeStartDeltaMs == -1000);
     // Low-millisecond rollover preserves bounded signed interval deltas.
     const uint64_t wrapped = ((uint64_t)UINT32_MAX + 2) * 1000;

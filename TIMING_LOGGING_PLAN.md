@@ -1,5 +1,28 @@
 # Rendezvous Timing and Logging Implementation Plan
 
+Executor integration (2026-09-08, not deployed): the live loop now executes
+home-first plans with rotating additional scouts and continuous radio activity
+across merged windows. Two home appointments form the planning horizon; the
+merge gap is 1 second and cumulative additional scout budget is 7 seconds.
+Sleep uses a 5.5-second boot/acquisition lead. The initial beacon-only acquisition
+and delayed ESP-NOW initialization are preserved. Missing fresh home timing
+keeps the board awake to reacquire rather than substituting a scout.
+
+Membership age and reset qualification now advance by elapsed logical periods,
+not physical boots. Only full, healthy home coverage qualifies a round; partial
+or scout coverage cannot do so. Wire version 7 adds a persisted exchange sequence
+for multiple intervals in one round: maximum packet size is 180 bytes. The
+analyzer closes intervals explicitly and matches sampled reception by incarnation
+and exchange sequence; its legacy cycle count denotes exchanges, not rounds.
+
+Validation: 20 host tests, including same-round exchange disambiguation. A
+300-second four-node CSIM run exercised merged home/scout intervals, full and
+partial coverage, packet reception, logical aging, and sleep/re-execution.
+CSIM is not proof of physical radio-state recovery or six-board convergence.
+All six physical boards remain on version 6; coordinated deployment and live
+reset/rejoin validation are still required. Earlier status sections below are
+historical checkpoints, including the original planner integration checklist.
+
 Status: host infrastructure, TSF/merge diagnostics, sender timing, and
 incarnation-aware membership are implemented through wire version 6, deployed
 to all six boards on 2026-09-08. Session-aware offline same-BSSID correlation is

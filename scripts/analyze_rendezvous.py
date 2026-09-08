@@ -63,11 +63,15 @@ def parse(data: bytes, limit: int) -> list[Cycle]:
             if current is not None:
                 current = None
             current = Cycle(t, t, capture=capture)
-        elif current is not None and END in line:
+        elif current is not None and (END in line or 'exchange complete interval ' in line):
             current.end = t
             if current.end >= current.start:
                 cycles.append(current)
             current = None
+        elif "TEST RESET EXECUTED" in line and current is not None:
+            current.reset = 'EXECUTED'
+        elif "TEST RESET COMMITTED" in line and current is not None:
+            current.reset = 'commit'
         elif "TEST RESET EXECUTED" in line and len(cycles) > session_start:
             cycles[-1].reset = "EXECUTED"
         elif "TEST RESET COMMITTED" in line and len(cycles) > session_start:

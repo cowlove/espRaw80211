@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include "rendezvousTiming.h"
 
-// Version 6 is a coordinated wire revision, little-endian except the six
+// Version 7 is a coordinated wire revision, little-endian except the six
 // BSSID octets, which are in printed/network order. No legacy decoding.
 struct __attribute__((packed)) BeaconReportHeader {
     uint8_t version;
@@ -19,6 +19,7 @@ struct __attribute__((packed)) BeaconReportHeader {
     int16_t exchangeStartDeltaMs;
     int16_t plannedEndDeltaMs;
     uint8_t timingValid;
+    uint32_t exchangeSequence;
 };
 struct __attribute__((packed)) BeaconClaimEntry {
     uint64_t originMac;
@@ -34,10 +35,10 @@ struct __attribute__((packed)) BeaconAssociationEntry {
     uint16_t ageCycles;
     uint32_t incarnation;
 };
-static_assert(sizeof(BeaconReportHeader) == 44, "unexpected wire header size");
+static_assert(sizeof(BeaconReportHeader) == 48, "unexpected wire header size");
 static_assert(sizeof(BeaconClaimEntry) == 25, "unexpected claim size");
 static_assert(sizeof(BeaconAssociationEntry) == 26, "unexpected association size");
-static_assert(44 + 2 * 25 + 3 * 26 + 4 == 176, "unexpected packet budget");
+static_assert(48 + 2 * 25 + 3 * 26 + 4 == 180, "unexpected packet budget");
 
 inline uint64_t reportClockBssid(const BeaconReportHeader &header) {
     uint64_t value = 0;
@@ -78,7 +79,7 @@ inline bool setReportTiming(BeaconReportHeader &header, uint64_t bssid,
 }
 
 inline bool validReportLength(const BeaconReportHeader &header, size_t length) {
-    return header.version == 6 && header.claimCount <= 2 &&
+    return header.version == 7 && header.claimCount <= 2 &&
         header.associationCount <= 3 && length == sizeof(header) +
         header.claimCount * sizeof(BeaconClaimEntry) +
         header.associationCount * sizeof(BeaconAssociationEntry);

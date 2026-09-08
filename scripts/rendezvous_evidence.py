@@ -5,7 +5,7 @@ from itertools import combinations
 import re
 
 PREFIX = re.compile(r'^(\S+) host_mono_ns=(\d+) board=(\S+) port=(\S+) session=(\S+) \| (.*)$')
-IDENTITY = re.compile(r'report-identity incarnation ([0-9a-f]+) wake (\d+) wire-version (\d+)')
+IDENTITY = re.compile(r'report-identity incarnation ([0-9a-f]+) wake (\d+) wire-version (\d+)(?: exchange (\d+))?')
 WINDOW = re.compile(r'beacon-clock target ([0-9a-f]+) tsf-packet (\d+) exchange (\d+)-(\d+)')
 
 
@@ -61,6 +61,7 @@ class Exchange:
     wake: int | None
     wall: float | None
     wire: int | None
+    sequence: int | None = None
     window: tuple | None = None
     home: str | None = None
     listeners: int | None = None
@@ -77,24 +78,24 @@ class Exchange:
 def parse_evidence(data):
     complete = []
     current = None
-    identity = (None, None, None)
+    identity = (None, None, None, None)
     previous_session = None
     partial = 0
     for _, session, wall, body in records(data):
         if session != previous_session or body.startswith('logger-session '):
             partial += current is not None
             current = None
-            identity = (None, None, None)
+            identity = (None, None, None, None)
             previous_session = session
         found = IDENTITY.search(body)
         if found:
             partial += current is not None
             current = None
-            epoch, wake, wire = found.groups()
-            identity = (epoch, int(wake), int(wire))
+            epoch, wake, wire, sequence = found.groups()
+            identity = (epoch, int(wake), int(wire), int(sequence) if sequence else None)
         if 'ESP-NOW exchange phase started' in body:
             partial += current is not None
-            current = Exchange(session, identity[0], identity[1], wall, identity[2])
+            current = Exchange(session, identity[0], identity[1], wall, identity[2], identity[3])
         if current is None:
             continue
         found = WINDOW.search(body)
@@ -125,7 +126,7 @@ def parse_evidence(data):
             current.peers[values['origin']] = values
         if 'report-clock-rx sender ' in body:
             current.received_clocks.append(fields(body.split('report-clock-rx ', 1)[1]))
-        if 'deep sleep ' in body:
+        if 'deep sleep ' in body or 'exchange complete interval ' in body:
             complete.append(current)
             current = None
     partial += current is not None
@@ -158,6 +159,8 @@ def summarize(data):
                                 'direct': found[3] == '1'})
     return {
         'complete_cycles': len(cycles), 'partial_cycles': partial,
+        'cycle_unit': 'completed exchange intervals (not logical rounds)',
+        'observed_round_identities': len({(c.session, c.epoch, c.wake) for c in cycles}),
         'observed_incarnation_changes': changes,
         'zero_rawrx_cycles': sum(c.rawrx == 0 for c in cycles),
         'valid_reports': sum(c.valid or 0 for c in cycles),
@@ -167,7 +170,8 @@ def summarize(data):
         'epoch_rejections_including_self': sum(c.epoch_rejected for c in cycles),
         'latest': None if latest is None else {
             'session': latest.session, 'incarnation': latest.epoch,
-            'wake': latest.wake, 'home': latest.home, 'listeners': latest.listeners,
+            'wake': latest.wake, 'exchange': latest.sequence,
+            'home': latest.home, 'listeners': latest.listeners,
             'health': latest.health, 'rawrx': latest.rawrx,
             'valid': latest.valid, 'host_time': latest.wall},
     }
@@ -198,7 +202,8 @@ def overlaps(datasets, max_host_skew=15):
                     matches = [r for r in receiver.received_clocks
                                if sender.epoch is not None and sender.wake is not None
                                and r.get('incarnation') == sender.epoch
-                               and r.get('wake') == str(sender.wake)]
+                               and ((sender.sequence is not None and r.get('exchange') == str(sender.sequence))
+                                    or (sender.sequence is None and r.get('wake') == str(sender.wake)))]
                     if matches:
                         return 'report-observed'
                     if receiver.rawrx == 0:
@@ -206,6 +211,7 @@ def overlaps(datasets, max_host_skew=15):
                     return 'unknown (one timing sample/peer/exchange)'
                 result.append({'left': left, 'right': right, 'bssid': a.window[0],
                                'left_wake': a.wake, 'right_wake': b.wake,
+                               'left_exchange': a.sequence, 'right_exchange': b.sequence,
                                'left_incarnation': a.epoch, 'right_incarnation': b.epoch,
                                'host_time': max(a.wall, b.wall),
                                'overlap_ms': duration / 1000,

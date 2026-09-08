@@ -80,7 +80,7 @@ int main() {
     for (const auto &a : reboot.associations) {
         if (a.originMac == 1) {
             assert(a.originEpoch == 50 && a.originGeneration == 1);
-            assert(a.selectedBeacon == 20 && a.ageCycles == 1);
+            assert(a.selectedBeacon == 20 && a.ageCycles == 0); // boot alone does not age evidence
             foundOne=true;
         }
         if (a.originMac == 2) foundTwo=true;

@@ -23,6 +23,21 @@ def cycle(epoch='aa', wake=1, bssid='abc', start=1000000, end=6000000,
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_v7_multiple_exchanges_in_one_round(self):
+        def exchange(sequence, extra=b''):
+            return cycle(epoch='bb', wake=2, extra=extra).replace(
+                b'wire-version 6', f'wire-version 7 exchange {sequence}'.encode()
+            ).replace(b'deep sleep 20 sec', f'exchange complete interval {sequence}'.encode())
+        data = exchange(10) + exchange(11)
+        parsed, partial = evidence.parse_evidence(data)
+        self.assertEqual([c.sequence for c in parsed], [10, 11])
+        self.assertEqual(partial, 0)
+        extra = line('00006.0 report-clock-rx sender 123 incarnation bb wake 2 packet 0 local-rx 6000000 bssid abc valid 1 exchange 10')
+        receiver = cycle(extra=extra).replace(b'rawrx 0 rx 0 valid 0', b'rawrx 8 rx 8 valid 8')
+        rows = evidence.overlaps([('a', receiver), ('b', data)])
+        self.assertEqual(rows[0]['left_received_right'], 'report-observed')
+        self.assertIn('unknown', rows[1]['left_received_right'])
+
     def test_convergence_cannot_span_logger_restart(self):
         data = (b'00005.0 ESP-NOW exchange phase started\n00010.0 deep sleep 20 sec\n'
                 b'00010.1 TEST RESET EXECUTED\nlogger-session host=x\n'
