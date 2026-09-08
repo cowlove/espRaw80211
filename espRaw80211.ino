@@ -6,6 +6,7 @@
 #include "originEpoch.h"
 #include "macIdentity.h"
 #include "rendezvousPlanner.h"
+#include "singletonJoinPolicy.h"
 #include "rendezvousExecutor.h"
 #include "testSwarmConfig.h"
 #ifndef ESP32
@@ -828,9 +829,22 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         return result;
     }
 
+    bool commitHome(uint64_t candidateBssid) {
+        if (!candidateBssid || candidateBssid == spiffsBeacon.read()) return false;
+        spiffsBeacon = candidateBssid;
+        spiffsProposalBeacon = (uint64_t)0;
+        spiffsProposalAge = 0;
+        spiffsScoutPhase = 0;
+        spiffsScoutBeacon = 0;
+        spiffsCurrentGoal = defaultRendezvousUsec;
+        spiffsCurrentRep = 0;
+        spiffsScale = 1.004;
+        return true;
+    }
+
     bool advanceProposal(uint64_t homeBssid, uint64_t candidateBssid) {
         if (candidateBssid == 0 || candidateBssid == homeBssid) {
-            spiffsProposalBeacon = 0;
+            spiffsProposalBeacon = (uint64_t)0;
             spiffsProposalAge = 0;
             return false;
         }
@@ -840,28 +854,22 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             spiffsProposalBeacon = candidateBssid;
             spiffsProposalAge = 1;
         }
-        // A lonely device joining an established pool is not the symmetric
-        // pool-to-pool case that needs hysteresis.  Once this wake's healthy
-        // exchange shows at least one other fresh supporter for a directly
-        // visible candidate, move immediately toward that pool.  Equal or
-        // closely matched pools still require two consecutive rounds.
-        const bool singletonJoiningPool =
-            listenerCount(homeBssid) == 1 &&
-            listenerCount(candidateBssid) >= 2;
-        if (spiffsProposalAge.read() < 2 && !singletonJoiningPool) return false;
+        if (spiffsProposalAge.read() < 2) return false;
+        return commitHome(candidateBssid);
+    }
 
-        // The candidate is directly visible in this wake and has already
-        // passed the strict-supporter-superset test. Commit while aligned to
-        // its clock, then reset the old beacon's timing calibration.
-        spiffsBeacon = candidateBssid;
-        spiffsProposalBeacon = 0;
-        spiffsProposalAge = 0;
-        spiffsScoutPhase = 0;
-        spiffsScoutBeacon = 0;
-        spiffsCurrentGoal = defaultRendezvousUsec;
-        spiffsCurrentRep = 0;
-        spiffsScale = 1.004;
-        return true;
+    bool adoptDirectlyObservedGroup(uint64_t homeBssid, uint64_t targetBssid) {
+        const size_t homeMembers = listenerCount(homeBssid);
+        const size_t targetMembers = listenerCount(targetBssid);
+        // This intentionally bypasses claim-set proof only for a singleton
+        // that has just completed a healthy, full scout appointment. Seeing
+        // two fresh associations at the destination is sufficient. Once it
+        // joins, this relaxed path no longer applies, limiting oscillation.
+        if (!SingletonJoinPolicy::mayAdopt(homeMembers, targetMembers)) return false;
+        out("singleton-join direct target %012llx members %u from %012llx",
+            (unsigned long long)targetBssid, (unsigned)targetMembers,
+            (unsigned long long)homeBssid);
+        return commitHome(targetBssid);
     }
 
     static void broadScanCallback(const WifiBeaconPacket &packet, void *arg) {
@@ -1411,13 +1419,19 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                     exchangeSequence, a.home ? "home" : "scout",
                     (unsigned long long)a.bssid, state.full ? 1U : 0U, healthy ? 1U : 0U);
                 if (a.home && spiffsBeacon.read() == a.bssid) {
-                    if (healthy) advanceProposal(a.bssid, reportOnlyCandidate(a.bssid));
-                    else { spiffsProposalBeacon = 0; spiffsProposalAge = 0; }
+                    if (listenerCount(a.bssid) == 1)
+                        { spiffsProposalBeacon = 0; spiffsProposalAge = 0; }
+                    else if (healthy && state.full)
+                        advanceProposal(a.bssid, reportOnlyCandidate(a.bssid));
+                    else if (!healthy)
+                        { spiffsProposalBeacon = 0; spiffsProposalAge = 0; }
                     if (healthy && state.full) {
                         spiffsRoundHealthy = 1;
                         spiffsRoundHome = a.bssid;
                     }
                 } else if (!a.home) {
+                    if (healthy && state.full)
+                        adoptDirectlyObservedGroup(plannedHome, a.bssid);
                     spiffsScoutCursor = a.bssid;
                     spiffsScoutBeacon = (uint64_t)0;
                     spiffsLastScoutRound = wakeGeneration;
