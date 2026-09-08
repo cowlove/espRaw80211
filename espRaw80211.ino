@@ -275,8 +275,12 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint32_t epochRejected = 0;
     SPIFFSVariable<int> spiffsScoutPhase{"/scoutPhase", 0};
     SPIFFSVariable<uint64_t> spiffsScoutBeacon{"/scoutBeacon", 0};
-    SPIFFSVariable<uint64_t> spiffsProposalBeacon{"/proposal", 0};
-    SPIFFSVariable<int> spiffsProposalAge{"/proposalAge", 0};
+    SPIFFSVariable<uint64_t> spiffsProposalBeacon{"/proposal9", 0};
+    SPIFFSVariable<uint64_t> spiffsProposalHome{"/proposalHome9", 0};
+    SPIFFSVariable<uint32_t> spiffsProposalActRound{"/proposalAct9", 0};
+    SPIFFSVariable<uint32_t> spiffsProposalMembers{"/proposalMembers9", 0};
+    SPIFFSVariable<uint64_t> spiffsCredibilityHome{"/credHome9", 0};
+    SPIFFSVariable<uint32_t> spiffsHomeCredibility{"/homeCred9", 0};
     SPIFFSVariable<int> spiffsTestConsensusCycles{"/testConsensus", 0};
     SPIFFSVariable<int> spiffsTestConsensusMisses{"/testMisses", 0};
     SPIFFSVariable<int> spiffsTestResetCommitted{"/testResetCommit", 0};
@@ -346,7 +350,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         spiffsScoutPhase = 0;
         spiffsScoutBeacon = (uint64_t)0;
         spiffsProposalBeacon = (uint64_t)0;
-        spiffsProposalAge = 0;
+        spiffsProposalHome = (uint64_t)0;
+        spiffsProposalActRound = (uint32_t)0;
+        spiffsProposalMembers = (uint32_t)0;
+        spiffsCredibilityHome = (uint64_t)0;
+        spiffsHomeCredibility = (uint32_t)0;
         spiffsTestConsensusCycles = 0;
         spiffsTestConsensusMisses = 0;
         spiffsTestResetCommitted = 0;
@@ -829,11 +837,19 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         return result;
     }
 
+    void clearMigrationProposal() {
+        spiffsProposalBeacon = (uint64_t)0;
+        spiffsProposalHome = (uint64_t)0;
+        spiffsProposalActRound = (uint32_t)0;
+        spiffsProposalMembers = (uint32_t)0;
+    }
+
     bool commitHome(uint64_t candidateBssid) {
         if (!candidateBssid || candidateBssid == spiffsBeacon.read()) return false;
         spiffsBeacon = candidateBssid;
-        spiffsProposalBeacon = (uint64_t)0;
-        spiffsProposalAge = 0;
+        clearMigrationProposal();
+        spiffsCredibilityHome = candidateBssid;
+        spiffsHomeCredibility = (uint32_t)0;
         spiffsScoutPhase = 0;
         spiffsScoutBeacon = 0;
         spiffsCurrentGoal = defaultRendezvousUsec;
@@ -842,34 +858,98 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         return true;
     }
 
-    bool advanceProposal(uint64_t homeBssid, uint64_t candidateBssid) {
-        if (candidateBssid == 0 || candidateBssid == homeBssid) {
-            spiffsProposalBeacon = (uint64_t)0;
-            spiffsProposalAge = 0;
+    void updateHomeCredibility(uint64_t homeBssid, bool healthy, bool full) {
+        uint32_t credibility = spiffsCredibilityHome.read() == homeBssid ?
+            spiffsHomeCredibility.read() : 0;
+        if (healthy && full)
+            credibility = SingletonJoinPolicy::reinforce(credibility,
+                reportSenderCount > 0);
+        else
+            credibility = SingletonJoinPolicy::decay(credibility);
+        spiffsCredibilityHome = homeBssid;
+        spiffsHomeCredibility = credibility;
+        out("home-credibility home %012llx score %u healthy %u full %u direct-peers %u",
+            (unsigned long long)homeBssid, credibility, healthy ? 1U : 0U,
+            full ? 1U : 0U, (unsigned)reportSenderCount);
+    }
+
+    void observeDirectScoutForMigration(uint64_t homeBssid, uint64_t targetBssid) {
+        const size_t homeMembers = listenerCount(homeBssid);
+        const size_t targetMembers = listenerCount(targetBssid);
+        if (SingletonJoinPolicy::mayAdopt(homeMembers, targetMembers)) {
+            out("singleton-join direct target %012llx members %u from %012llx",
+                (unsigned long long)targetBssid, (unsigned)targetMembers,
+                (unsigned long long)homeBssid);
+            commitHome(targetBssid);
+            return;
+        }
+        if (!SingletonJoinPolicy::mayPropose(homeMembers, targetMembers)) {
+            if (spiffsProposalBeacon.read() == targetBssid) {
+                out("migration-proposal canceled target %012llx target-members %u home-members %u reason not-larger",
+                    (unsigned long long)targetBssid, (unsigned)targetMembers,
+                    (unsigned)homeMembers);
+                clearMigrationProposal();
+            } else {
+                out("migration-rejected target %012llx target-members %u home-members %u reason not-larger",
+                    (unsigned long long)targetBssid, (unsigned)targetMembers,
+                    (unsigned)homeMembers);
+            }
+            return;
+        }
+        const uint32_t credibility = spiffsCredibilityHome.read() == homeBssid ?
+            spiffsHomeCredibility.read() : 0;
+        const uint64_t pending = spiffsProposalBeacon.read();
+        if (pending == targetBssid && spiffsProposalHome.read() == homeBssid) {
+            spiffsProposalMembers = (uint32_t)targetMembers;
+            out("migration-proposal refreshed target %012llx target-members %u home-members %u act-round %u",
+                (unsigned long long)targetBssid, (unsigned)targetMembers,
+                (unsigned)homeMembers, spiffsProposalActRound.read());
+            return;
+        }
+        if (pending && targetMembers <= spiffsProposalMembers.read()) {
+            out("migration-rejected target %012llx target-members %u pending %012llx pending-members %u reason weaker-than-pending",
+                (unsigned long long)targetBssid, (unsigned)targetMembers,
+                (unsigned long long)pending, spiffsProposalMembers.read());
+            return;
+        }
+        const uint32_t delay = SingletonJoinPolicy::proposalDelay(credibility);
+        spiffsProposalBeacon = targetBssid;
+        spiffsProposalHome = homeBssid;
+        spiffsProposalActRound = wakeGeneration + delay;
+        spiffsProposalMembers = (uint32_t)targetMembers;
+        out("migration-proposal direct target %012llx target-members %u home %012llx home-members %u credibility %u act-round %u",
+            (unsigned long long)targetBssid, (unsigned)targetMembers,
+            (unsigned long long)homeBssid, (unsigned)homeMembers,
+            credibility, wakeGeneration + delay);
+    }
+
+    bool maybeCommitMigration(uint64_t homeBssid) {
+        const uint64_t target = spiffsProposalBeacon.read();
+        if (!target) return false;
+        if (spiffsProposalHome.read() != homeBssid) {
+            out("migration-proposal canceled target %012llx reason home-changed",
+                (unsigned long long)target);
+            clearMigrationProposal();
             return false;
         }
-        if (spiffsProposalBeacon.read() == candidateBssid)
-            spiffsProposalAge = spiffsProposalAge.read() + 1;
-        else {
-            spiffsProposalBeacon = candidateBssid;
-            spiffsProposalAge = 1;
+        const size_t homeMembers = listenerCount(homeBssid);
+        if (homeMembers >= spiffsProposalMembers.read()) {
+            out("migration-proposal canceled target %012llx target-snapshot %u home-members %u reason home-caught-up",
+                (unsigned long long)target, spiffsProposalMembers.read(),
+                (unsigned)homeMembers);
+            clearMigrationProposal();
+            return false;
         }
-        if (spiffsProposalAge.read() < 2) return false;
-        return commitHome(candidateBssid);
+        if (int32_t(wakeGeneration-spiffsProposalActRound.read()) < 0) return false;
+        out("migration-proposal committed target %012llx target-snapshot %u home-members %u credibility %u",
+            (unsigned long long)target, spiffsProposalMembers.read(),
+            (unsigned)homeMembers, spiffsHomeCredibility.read());
+        return commitHome(target);
     }
 
     bool adoptDirectlyObservedGroup(uint64_t homeBssid, uint64_t targetBssid) {
-        const size_t homeMembers = listenerCount(homeBssid);
-        const size_t targetMembers = listenerCount(targetBssid);
-        // This intentionally bypasses claim-set proof only for a singleton
-        // that has just completed a healthy, full scout appointment. Seeing
-        // two fresh associations at the destination is sufficient. Once it
-        // joins, this relaxed path no longer applies, limiting oscillation.
-        if (!SingletonJoinPolicy::mayAdopt(homeMembers, targetMembers)) return false;
-        out("singleton-join direct target %012llx members %u from %012llx",
-            (unsigned long long)targetBssid, (unsigned)targetMembers,
-            (unsigned long long)homeBssid);
-        return commitHome(targetBssid);
+        observeDirectScoutForMigration(homeBssid, targetBssid);
+        return spiffsBeacon.read() == targetBssid;
     }
 
     static void broadScanCallback(const WifiBeaconPacket &packet, void *arg) {
@@ -1419,12 +1499,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                     exchangeSequence, a.home ? "home" : "scout",
                     (unsigned long long)a.bssid, state.full ? 1U : 0U, healthy ? 1U : 0U);
                 if (a.home && spiffsBeacon.read() == a.bssid) {
-                    if (listenerCount(a.bssid) == 1)
-                        { spiffsProposalBeacon = 0; spiffsProposalAge = 0; }
-                    else if (healthy && state.full)
-                        advanceProposal(a.bssid, reportOnlyCandidate(a.bssid));
-                    else if (!healthy)
-                        { spiffsProposalBeacon = 0; spiffsProposalAge = 0; }
+                    updateHomeCredibility(a.bssid, healthy, state.full);
+                    if (healthy && state.full)
+                        maybeCommitMigration(a.bssid);
                     if (healthy && state.full) {
                         spiffsRoundHealthy = 1;
                         spiffsRoundHome = a.bssid;

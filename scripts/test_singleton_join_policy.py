@@ -12,7 +12,7 @@ class SingletonJoinPolicyTests(unittest.TestCase):
         source = r'''
 #include <cassert>
 #include "singletonJoinPolicy.h"
-using SingletonJoinPolicy::mayAdopt;
+using namespace SingletonJoinPolicy;
 int main() {
     assert(!mayAdopt(0, 2));
     assert(!mayAdopt(1, 0));
@@ -20,6 +20,19 @@ int main() {
     assert(mayAdopt(1, 2));
     assert(mayAdopt(1, 7));
     assert(!mayAdopt(2, 7)); // relaxed path stops after joining a group
+    assert(!mayPropose(1, 7)); // singleton path is separate
+    assert(!mayPropose(3, 3));
+    assert(!mayPropose(3, 2));
+    assert(mayPropose(3, 4));
+    assert(proposalDelay(0)==2);
+    assert(proposalDelay(3)==2);
+    assert(proposalDelay(4)==3);
+    assert(proposalDelay(12)==5);
+    assert(proposalDelay(100)==5);
+    assert(reinforce(0,true)==1);
+    assert(reinforce(12,true)==12);
+    assert(reinforce(3,false)==3);
+    assert(decay(3)==2 && decay(0)==0);
 }
 '''
         with tempfile.TemporaryDirectory() as directory:
