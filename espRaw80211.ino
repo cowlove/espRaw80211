@@ -1299,6 +1299,30 @@ public:
         const uint64_t previousSleep = spiffsSleepTime.read();
         const float percentLate = previousSleep ? abs(100.0 * usecLate / previousSleep) : 0.0;
 
+        // Project the local ESP-NOW window onto the tracked beacon's TSF
+        // clock. This makes two boards' logs directly comparable when they
+        // are visiting the same beacon, even though their local micros()
+        // clocks and serial log timestamps are unrelated.
+        const uint64_t beaconExchangeStart = beacon->ts +
+            (espNowStartUsec >= packetRxTime ?
+             espNowStartUsec - packetRxTime : 0);
+        const uint64_t beaconExchangeEnd = beacon->ts +
+            (espNowEndUsec >= packetRxTime ?
+             espNowEndUsec - packetRxTime : 0);
+        const uint64_t beaconCycle = beaconExchangeStart / goal;
+        const uint64_t beaconCycleStart = beaconCycle * goal;
+        const uint64_t beaconCycleStop = beaconCycleStart + goal;
+        const unsigned crossesBoundary = beaconExchangeEnd >= beaconCycleStop ? 1U : 0U;
+        out("beacon-clock target %012llx tsf-packet %llu exchange %llu-%llu cycle %llu start %llu stop %llu crosses-boundary %u",
+            (unsigned long long)beacon->ssid,
+            (unsigned long long)beacon->ts,
+            (unsigned long long)beaconExchangeStart,
+            (unsigned long long)beaconExchangeEnd,
+            (unsigned long long)beaconCycle,
+            (unsigned long long)beaconCycleStart,
+            (unsigned long long)beaconCycleStop,
+            crossesBoundary);
+
         if (resetReason() == 5 || loopCount > 1) {
             out("slept %lld (%.1fs) rssi %d goal %.2fs rep %d beacon offset %d esp offset %d difference %d late (%.3f%%) scale %f",
                 (long long)previousSleep, previousSleep / 1000000.0, beacon->rssi,
