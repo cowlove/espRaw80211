@@ -11,6 +11,7 @@ import json
 import shlex
 import time
 from collections import defaultdict
+from itertools import combinations
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -320,6 +321,95 @@ def print_current_home_distribution(datasets) -> None:
         print(f"  unknown-home devices={len(unknown)}  boards={','.join(unknown)}")
 
 
+def scout_link_stats(datasets):
+    """Measure directed packet delivery during same-target scout overlaps."""
+    parsed = {name: evidence.parse_evidence(data)[0] for name, data in datasets}
+    epoch_owners = defaultdict(set)
+    for name, cycles in parsed.items():
+        for cycle in cycles:
+            if cycle.epoch:
+                epoch_owners[cycle.epoch].add(name)
+
+    # report-clock-rx ties an on-wire sender identity to the sender's unique
+    # incarnation. Reuse that mapping for all per-origin summary counters.
+    origin_owners = defaultdict(set)
+    for cycles in parsed.values():
+        for cycle in cycles:
+            for record in cycle.received_clocks:
+                owners = epoch_owners.get(record.get('incarnation'), set())
+                if len(owners) == 1 and record.get('sender'):
+                    origin_owners[record['sender']].update(owners)
+    board_origins = defaultdict(set)
+    for origin, owners in origin_owners.items():
+        if len(owners) == 1:
+            board_origins[next(iter(owners))].add(origin)
+
+    rows = []
+    for left, right in combinations(sorted(parsed), 2):
+        opportunities = []
+        for a in parsed[left]:
+            if a.wall is None or a.end_wall is None or not a.appointment_targets:
+                continue
+            for b in parsed[right]:
+                if b.wall is None or b.end_wall is None or not b.appointment_targets:
+                    continue
+                targets = ((a.scout_targets & b.appointment_targets) |
+                           (b.scout_targets & a.appointment_targets))
+                overlap = min(a.end_wall, b.end_wall) - max(a.wall, b.wall)
+                if targets and overlap > 0:
+                    opportunities.append((a, b, overlap, sorted(targets)))
+        if not opportunities:
+            continue
+
+        def direction(receiver_cycles, sender):
+            values = []
+            raw_values = []
+            known = bool(board_origins[sender])
+            for receiver in receiver_cycles:
+                peer_rows = [receiver.peers[origin] for origin in board_origins[sender]
+                             if origin in receiver.peers]
+                values.append(sum(int(peer.get('valid', 0)) for peer in peer_rows))
+                raw_values.append(sum(int(peer.get('frames', 0)) for peer in peer_rows))
+            return {
+                'identity_mapped': known,
+                'received_cycles': sum(value > 0 for value in values),
+                'valid_packets': sum(values),
+                'raw_packets': sum(raw_values),
+                'valid_per_opportunity': sum(values) / len(values),
+            }
+
+        rows.append({
+            'left': left, 'right': right,
+            'opportunities': len(opportunities),
+            'overlap_seconds': sum(item[2] for item in opportunities),
+            'targets': sorted({target for item in opportunities for target in item[3]}),
+            'left_received_from_right': direction([item[0] for item in opportunities], right),
+            'right_received_from_left': direction([item[1] for item in opportunities], left),
+        })
+    return rows
+
+
+def print_scout_link_stats(rows) -> None:
+    print('Scout ESP-NOW pairwise delivery | same-target overlapping intervals only')
+    if not rows:
+        print('  no qualifying scout overlaps in retained tails')
+        return
+    for row in rows:
+        print(f"  {row['left']} <-> {row['right']}  opportunities={row['opportunities']} "
+              f"overlap={row['overlap_seconds']:.1f}s targets={','.join(row['targets'])}")
+        for receiver, sender, key in (
+                (row['left'], row['right'], 'left_received_from_right'),
+                (row['right'], row['left'], 'right_received_from_left')):
+            value = row[key]
+            if not value['identity_mapped']:
+                print(f'    {receiver} <- {sender}: sender identity unavailable')
+                continue
+            reliability = 100 * value['received_cycles'] / row['opportunities']
+            print(f"    {receiver} <- {sender}: hit={value['received_cycles']}/{row['opportunities']} "
+                  f"({reliability:.0f}%) valid/opportunity={value['valid_per_opportunity']:.1f} "
+                  f"valid={value['valid_packets']} raw={value['raw_packets']}")
+
+
 def rendezvous_dashboard(name: str, data: bytes) -> bool:
     """Apply an ARTIFICIAL test oracle, not a discoverable global membership."""
     required = swarm_board_count()
@@ -349,6 +439,8 @@ def main() -> int:
     ap.add_argument("--until", help="inclusive ISO host timestamp with timezone")
     ap.add_argument("--evidence", action="store_true", help="summarize reception, merges and incarnations")
     ap.add_argument("--overlaps", action="store_true", help="compare same-BSSID planned exchange windows")
+    ap.add_argument("--scout-links", action="store_true",
+                    help="show pairwise ESP-NOW delivery during same-target scout overlaps")
     ap.add_argument("--json", action="store_true", help="machine-readable evidence and optional overlaps")
     ap.add_argument("--local-only", action="store_true", help="do not read Miner6")
     args = ap.parse_args()
@@ -382,15 +474,18 @@ def main() -> int:
         datasets.append((name, selected))
         for note in notes:
             print(f'{name}: {note}', file=sys.stderr)
-    if args.evidence or args.overlaps or args.json:
+    if args.evidence or args.overlaps or args.scout_links or args.json:
         summaries = {name: evidence.summarize(data) for name, data in datasets}
         home_distribution, unknown_homes = current_home_distribution(datasets)
         home_distribution_unchanged_cycles = current_home_unchanged_cycles(datasets)
         pairs = evidence.overlaps(datasets) if args.overlaps else []
+        scout_links = scout_link_stats(datasets) if args.scout_links else []
         caveats = ['Overlap is same-BSSID planned-window evidence, not proof of radio delivery.',
                    'Host clocks must be approximately aligned; 15-second host-time gate applied.',
                    'Epoch rejection totals include normal self-origin relay rejection.',
                    'Absence of a sampled packet is not proof that no packet arrived.']
+        if args.scout_links:
+            caveats.append('Scout-link packet counts cover the complete merged radio interval containing the qualifying scout overlap.')
         if args.json:
             print(json.dumps({'boards': summaries,
                               'current_home_distribution': home_distribution,
@@ -398,6 +493,7 @@ def main() -> int:
                                   home_distribution_unchanged_cycles,
                               'unknown_home_boards': unknown_homes,
                               'overlaps': pairs,
+                              'scout_links': scout_links,
                               'warnings': warnings, 'caveats': caveats}, indent=2))
         else:
             print_current_home_distribution(datasets)
@@ -414,6 +510,8 @@ def main() -> int:
                 print(f'Same-BSSID planned overlaps: {len(pairs)} (showing latest 20)')
                 for pair in pairs[-20:]:
                     print(json.dumps(pair, sort_keys=True))
+            if args.scout_links:
+                print_scout_link_stats(scout_links)
             for note in caveats:
                 print('Note: ' + note)
         return 0

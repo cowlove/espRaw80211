@@ -7,6 +7,7 @@ import re
 PREFIX = re.compile(r'^(\S+) host_mono_ns=(\d+) board=(\S+) port=(\S+) session=(\S+) \| (.*)$')
 IDENTITY = re.compile(r'report-identity incarnation ([0-9a-f]+) wake (\d+) wire-version (\d+)(?: exchange (\d+))?')
 WINDOW = re.compile(r'beacon-clock target ([0-9a-f]+) tsf-packet (\d+) exchange (\d+)-(\d+)')
+APPOINTMENT = re.compile(r'appointment complete exchange (\d+) kind (home|scout) target ([0-9a-f]+) full (\d+) healthy (\d+)')
 
 
 def timestamp(value):
@@ -73,6 +74,11 @@ class Exchange:
     bad_length: int = 0
     peers: dict = field(default_factory=dict)
     received_clocks: list = field(default_factory=list)
+    appointment_kinds: set = field(default_factory=set)
+    appointment_targets: set = field(default_factory=set)
+    scout_targets: set = field(default_factory=set)
+    home_targets: set = field(default_factory=set)
+    end_wall: float | None = None
 
 
 def parse_evidence(data):
@@ -126,7 +132,16 @@ def parse_evidence(data):
             current.peers[values['origin']] = values
         if 'report-clock-rx sender ' in body:
             current.received_clocks.append(fields(body.split('report-clock-rx ', 1)[1]))
+        found = APPOINTMENT.search(body)
+        if found and (current.sequence is None or int(found[1]) == current.sequence):
+            current.appointment_kinds.add(found[2])
+            current.appointment_targets.add(found[3])
+            if found[2] == 'scout':
+                current.scout_targets.add(found[3])
+            else:
+                current.home_targets.add(found[3])
         if 'deep sleep ' in body or 'exchange complete interval ' in body:
+            current.end_wall = wall
             complete.append(current)
             current = None
     partial += current is not None

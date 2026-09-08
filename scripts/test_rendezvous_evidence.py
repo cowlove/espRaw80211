@@ -11,15 +11,17 @@ def line(body, session='s1', second=0):
 
 
 def cycle(epoch='aa', wake=1, bssid='abc', start=1000000, end=6000000,
-          second=0, extra=b'', session='s1'):
+          second=0, extra=b'', session='s1', kind='home', end_second=None):
     return b''.join([
         line(f'00000.1 report-identity incarnation {epoch} wake {wake} wire-version 6', session, second),
         line('00005.0 ESP-NOW exchange phase started', session, second),
         extra,
         line(f'00010.0 beacon-clock target {bssid} tsf-packet 100 exchange {start}-{end}', session, second),
+        line(f'00010.0 appointment complete exchange 1 kind {kind} target {bssid} full 1 healthy 1', session, second),
         line('00010.1 gossip home exchange incomplete home abc listeners 1 rawrx 0 rx 0 valid 0', session, second),
         line('00010.2 association-merge attempts 9 accepted 3 rejected 6 invalid 0 older-generation 1 not-fresher 5 table-full 0', session, second),
-        line('00010.3 deep sleep 20 sec', session, second)])
+        line('00010.3 deep sleep 20 sec', session,
+             second if end_second is None else end_second)])
 
 
 class EvidenceTests(unittest.TestCase):
@@ -99,6 +101,25 @@ class EvidenceTests(unittest.TestCase):
         data = cycle(extra=extra).replace(b'00010.1', b'\x0000010.1')
         cycles, _ = evidence.parse_evidence(data)
         self.assertEqual(cycles[0].peers['123']['radio-from'], '321')
+
+    def test_scout_pairwise_bandwidth_excludes_home_only(self):
+        # Incarnations identify each board; clock samples map its wire origin.
+        a_extra = (line('00006.0 report-clock-rx sender bbb incarnation bb wake 1 packet 0 local-rx 6000000 bssid abc valid 1 exchange 1') +
+                   line('00009.0 espnow summary origin bbb radio-from bbb frames 8 valid 7 short 1'))
+        b_extra = (line('00006.0 report-clock-rx sender aaa incarnation aa wake 1 packet 0 local-rx 6000000 bssid abc valid 1 exchange 1') +
+                   line('00009.0 espnow summary origin aaa radio-from aaa frames 6 valid 5 short 1'))
+        scout_rows = analyzer.scout_link_stats([
+            ('a', cycle(epoch='aa', extra=a_extra, kind='scout', end_second=5)),
+            ('b', cycle(epoch='bb', extra=b_extra, kind='home', end_second=5)),
+        ])
+        self.assertEqual(len(scout_rows), 1)
+        self.assertEqual(scout_rows[0]['left_received_from_right']['valid_packets'], 7)
+        self.assertEqual(scout_rows[0]['right_received_from_left']['valid_packets'], 5)
+        home_rows = analyzer.scout_link_stats([
+            ('a', cycle(epoch='aa', extra=a_extra, end_second=5)),
+            ('b', cycle(epoch='bb', extra=b_extra, end_second=5)),
+        ])
+        self.assertEqual(home_rows, [])
 
 
 if __name__ == '__main__':
