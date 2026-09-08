@@ -21,6 +21,7 @@ struct BeaconAssociation {
     uint64_t originMac, selectedBeacon;
     uint32_t originGeneration, ageCycles;
     uint64_t received;
+    uint32_t originEpoch;
 };
 struct Harness {
     static constexpr unsigned associationTableSize = 2;

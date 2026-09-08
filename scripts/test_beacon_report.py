@@ -15,24 +15,24 @@ class BeaconReportTests(unittest.TestCase):
 #include "beaconReport.h"
 int main() {
     BeaconReportHeader h = {};
-    h.version = 5;
+    h.version = 6;
     h.incarnation = 0x12345678;
+    h.claimCount = 2;
+    h.associationCount = 3;
+    assert(sizeof(h) + 2*sizeof(BeaconClaimEntry) +
+           3*sizeof(BeaconAssociationEntry) + 4 == 176);
+    assert(validReportLength(h, 172));
+    assert(!validReportLength(h, 171));
+    assert(!validReportLength(h, 173));
     h.claimCount = 3;
-    h.associationCount = 4;
-    assert(sizeof(h) + 3*sizeof(BeaconClaimEntry) +
-           4*sizeof(BeaconAssociationEntry) + 4 == 199);
-    assert(validReportLength(h, 195));
-    assert(!validReportLength(h, 194));
-    assert(!validReportLength(h, 196));
-    h.claimCount = 4;
     assert(!validReportLength(h, 216));
-    h.claimCount = 3;
-    h.associationCount = 5;
-    assert(!validReportLength(h, 217));
+    h.claimCount = 2;
     h.associationCount = 4;
-    h.version = 4;
-    assert(!validReportLength(h, 195));
+    assert(!validReportLength(h, 217));
+    h.associationCount = 3;
     h.version = 5;
+    assert(!validReportLength(h, 172));
+    h.version = 6;
     assert(setReportTiming(h, 0x60a4b792da8aULL, 100000000,
                            7000000, 6000000, 11000000));
     assert(h.clockMsLow == 100000);

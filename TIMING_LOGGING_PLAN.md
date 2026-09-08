@@ -1,8 +1,9 @@
 # Rendezvous Timing and Logging Implementation Plan
 
-Status: host infrastructure, TSF/merge diagnostics, and version-5 sender timing
-are implemented. Version 5 is not deployed; behavioral incarnation handling,
-offline correlation, and interval scheduling remain pending.
+Status: host infrastructure, TSF/merge diagnostics, sender timing, and
+incarnation-aware membership are implemented through wire version 6. Not yet
+deployed; hardware validation, offline correlation, and interval scheduling
+remain pending. Earlier slice descriptions below are historical checkpoints.
 
 ## Review amendments and implementation boundary (2026-09-08)
 
@@ -100,6 +101,45 @@ packet-size, truncated/extra-byte/count rejection, signed delta limits, invalid
 observations, and 32-bit millisecond rollover. All six boards must move to this
 wire version together at the later coordinated deployment; none changed here.
 The final ESP32 build passes (RAM 89,084 bytes; flash 1,144,234 bytes).
+
+Fourth slice (2026-09-08): wire version 6 adds a four-byte origin incarnation to
+each relayed claim/association. Maximum capacity is now two claims and three
+associations, rotating through the retained tables: 44 + 2*25 + 3*26 + 4 = 176
+physical bytes. This reduces records per report; eventual gossip propagation
+and convergence impact must be measured, not assumed equivalent to version 5.
+
+A 32-origin registry retains the accepted incarnation across deep sleep.
+Unknown origins may be introduced by gossip; only a direct report from that
+origin can replace an established incarnation. Random IDs are compared for
+equality only. Replacing an incarnation purges ALL old claims and associations
+for that origin before applying its new, possibly lower generation. Differing
+incarnations in relayed entries are rejected even if their generation is higher.
+Received entries cannot modify this board's own evidence. Registry exhaustion
+rejects new identities rather than evicting known origins and enabling rollback.
+The epoch rejection counter is separate from association merge attempt counters.
+
+Direct means the report sender header, not an entry forwarded within that
+report. This is the existing trusted-farm protocol, not an authenticated/replay-
+protected transport: an arbitrarily replayed OLD direct header can still switch
+incarnations. The guarantee here is against stale relayed entries, not adversarial
+sender spoofing or replay. No ordering is inferred between random incarnation IDs.
+
+Persistence uses new /claims6, /associations6, and /origins6 keys; old keys are
+left intact but not imported because they lack incarnation provenance. Startup
+retains only records matching the persisted registry, so a mismatched partial
+checkpoint is discarded instead of assigned the wrong incarnation. These writes
+are not an atomic checkpoint: power loss can lose recent learned evidence.
+Registry and tables reset together for the test reset. Ordinary sleep retains
+the registry. Existing within-incarnation generation/age rules remain unchanged.
+
+Validation: seven host tests pass, including production gating, merge and
+persistence code exercised through reset-to-generation-1, numerically lower
+new incarnation IDs, stale/unknown-epoch relays, unaffected peers, self-origin
+protection, reload, inconsistent checkpoint records, and registry capacity.
+ESP32 build passes (RAM 90,988; flash 1,146,418 bytes). No boards deployed.
+Next hardware gate: upgrade all six together, verify report reception and timing,
+then reset one board and confirm old relays do not prevent rejoin. Analyzer
+correlation and interval scheduling remain later work.
 
 This document records the agreed direction for the next implementation pass.
 The six deployed boards are controlled as one ecosystem: a firmware packet

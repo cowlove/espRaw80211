@@ -3,6 +3,7 @@
 #include "raw80211Capture.h"
 #include "rendezvousTiming.h"
 #include "beaconReport.h"
+#include "originEpoch.h"
 #ifndef ESP32
 #error Only the ESP32 is supported
 #endif
@@ -50,8 +51,8 @@ struct BeaconInfo {
 // ESPNowMux reserves four bytes for the routing prefix and uses a conservative
 // 200-byte physical packet size.
 static_assert(sizeof(BeaconReportHeader) +
-              3 * sizeof(BeaconClaimEntry) +
-              4 * sizeof(BeaconAssociationEntry) + 4 <= ESPNowMux::physicalPacketBytes,
+              2 * sizeof(BeaconClaimEntry) +
+              3 * sizeof(BeaconAssociationEntry) + 4 <= ESPNowMux::physicalPacketBytes,
               "BRPT report exceeds ESPNowMux packet budget");
 
 struct BeaconClaim {
@@ -65,6 +66,7 @@ struct BeaconClaim {
     // Runtime-only: persisted claims remain relay knowledge, but only claims
     // refreshed or received during this wake may vote in a decision.
     uint32_t receivedWakeGeneration = 0;
+    uint32_t originEpoch = 0;
 };
 
 struct BeaconAssociation {
@@ -73,6 +75,7 @@ struct BeaconAssociation {
     uint32_t originGeneration = 0;
     uint32_t ageCycles = 0;
     uint64_t storedAtUsec = 0;
+    uint32_t originEpoch = 0;
 };
 
 struct RemoteBeaconStats {
@@ -206,8 +209,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     // Header plus rotating visibility and association records, including the
     // four-byte BRPT prefix, stays within ESPNowMux's conservative 200-byte
     // physical packet limit.
-    static constexpr size_t reportMaxClaims = 3;
-    static constexpr size_t reportMaxAssociations = 4;
+    static constexpr size_t reportMaxClaims = 2;
+    static constexpr size_t reportMaxAssociations = 3;
     static constexpr int reportMinRssi = -85;
     static constexpr int minimumCandidatePackets = 3;
     // Testing-only bootstrap policy: after flash erase or an automatic test
@@ -243,8 +246,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     SPIFFSVariable<int> spiffsCurrentRep{"/currentRep", 0};
     SPIFFSVariable<uint32_t> spiffsClaimGeneration{"/claimGen", 0};
     SPIFFSVariable<uint32_t> spiffsIncarnation{"/incarnation", 0};
-    SPIFFSVariable<string> spiffsClaims{"/claims", ""};
-    SPIFFSVariable<string> spiffsAssociations{"/associations", ""};
+    SPIFFSVariable<string> spiffsClaims{"/claims6", ""};
+    SPIFFSVariable<string> spiffsAssociations{"/associations6", ""};
+    SPIFFSVariable<string> spiffsOrigins{"/origins6", ""};
+    OriginEpoch originEpochs[32] = {};
+    uint32_t epochRejected = 0;
     SPIFFSVariable<int> spiffsScoutPhase{"/scoutPhase", 0};
     SPIFFSVariable<uint64_t> spiffsScoutBeacon{"/scoutBeacon", 0};
     SPIFFSVariable<uint64_t> spiffsProposalBeacon{"/proposal", 0};
@@ -306,6 +312,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         spiffsBeacon = (uint64_t)0;
         spiffsClaims = string("");
         spiffsAssociations = string("");
+        spiffsOrigins = string("");
+        memset(originEpochs, 0, sizeof(originEpochs));
         spiffsClaimGeneration = (uint32_t)0;
         spiffsIncarnation = (uint32_t)0;
         spiffsScoutPhase = 0;
@@ -373,6 +381,65 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             (unsigned long long)homeBssid, testResetDelayCycles);
     }
 
+    bool epochMatches(uint64_t origin, uint32_t epoch) const {
+        for (const OriginEpoch &entry : originEpochs)
+            if (entry.origin == origin) return epoch != 0 && entry.epoch == epoch;
+        return false;
+    }
+
+    bool acceptOrigin(uint64_t origin, uint32_t epoch, bool direct) {
+        // Relays must never replace or refresh this board's own evidence.
+        if (origin == deviceMac && (!direct || epoch != incarnation)) {
+            epochRejected++;
+            return false;
+        }
+        const EpochDecision decision = acceptEpoch(originEpochs, 32, origin, epoch, direct);
+        if (decision == EpochDecision::rejected) {
+            epochRejected++;
+            return false;
+        }
+        if (decision == EpochDecision::introduced || decision == EpochDecision::replaced) {
+            for (BeaconClaim &claim : claims)
+                if (claim.originMac == origin && claim.originEpoch != epoch) claim = {};
+            for (BeaconAssociation &association : associations)
+                if (association.originMac == origin && association.originEpoch != epoch)
+                    association = {};
+            out("origin-incarnation origin %012llx epoch %08x direct %u replaced %u",
+                (unsigned long long)origin, epoch, direct ? 1U : 0U,
+                decision == EpochDecision::replaced ? 1U : 0U);
+        }
+        return true;
+    }
+
+    void loadOrigins() {
+        memset(originEpochs, 0, sizeof(originEpochs));
+        const string encoded = spiffsOrigins.read();
+        size_t offset = 0;
+        for (OriginEpoch &entry : originEpochs) {
+            unsigned long long origin = 0;
+            unsigned epoch = 0;
+            int consumed = 0;
+            if (sscanf(encoded.c_str() + offset, "%llx,%x;%n", &origin,
+                       &epoch, &consumed) != 2 || consumed <= 0) break;
+            entry.origin = origin;
+            entry.epoch = epoch;
+            offset += consumed;
+            if (offset >= encoded.size()) break;
+        }
+    }
+
+    void saveOrigins() {
+        string encoded;
+        char record[40];
+        for (const OriginEpoch &entry : originEpochs) {
+            if (!entry.origin) continue;
+            snprintf(record, sizeof(record), "%llx,%x;",
+                     (unsigned long long)entry.origin, entry.epoch);
+            encoded += record;
+        }
+        spiffsOrigins = encoded;
+    }
+
     void loadClaims() {
         memset(claims, 0, sizeof(claims));
         const string encoded = spiffsClaims.read();
@@ -384,34 +451,30 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             unsigned generation = 0;
             int rssi = -127;
             unsigned learned = 0;
+            unsigned epoch = 0;
             int consumed = 0;
             int fields = sscanf(encoded.c_str() + offset,
-                "%llx,%llx,%x,%d,%x;%n", &origin, &bssid, &generation,
-                &rssi, &learned, &consumed);
-            if (fields != 5 || consumed <= 0) {
-                consumed = 0;
-                fields = sscanf(encoded.c_str() + offset,
-                    "%llx,%llx,%x,%d;%n", &origin, &bssid, &generation,
-                    &rssi, &consumed);
-                if (fields != 4 || consumed <= 0) break;
-            }
+                "%llx,%llx,%x,%d,%x,%x;%n", &origin, &bssid, &generation,
+                &rssi, &learned, &epoch, &consumed);
+            if (fields != 6 || consumed <= 0) break;
+            if (epochMatches(origin, epoch))
             claims[slot++] = {(uint64_t)origin, (uint64_t)bssid,
                               (uint32_t)generation, (int8_t)rssi,
-                              (uint32_t)learned, 0};
+                              (uint32_t)learned, 0, epoch};
             offset += (size_t)consumed;
         }
     }
 
     void saveClaims() {
         string encoded;
-        char record[64];
+        char record[80];
         for (const BeaconClaim &claim : claims) {
             if (claim.originMac == 0) continue;
-            snprintf(record, sizeof(record), "%llx,%llx,%x,%d,%x;",
+            snprintf(record, sizeof(record), "%llx,%llx,%x,%d,%x,%x;",
                      (unsigned long long)claim.originMac,
                      (unsigned long long)claim.bssid,
                      claim.originGeneration, (int)claim.rssi,
-                     claim.learnedWakeGeneration);
+                     claim.learnedWakeGeneration, claim.originEpoch);
             encoded += record;
         }
         spiffsClaims = encoded;
@@ -431,18 +494,19 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             unsigned long long selected = 0;
             unsigned generation = 0;
             unsigned age = 0;
+            unsigned epoch = 0;
             int consumed = 0;
             const int fields = sscanf(encoded.c_str() + offset,
-                "%llx,%llx,%x,%x;%n", &origin, &selected, &generation,
-                &age, &consumed);
-            if (fields != 4 || consumed <= 0) break;
+                "%llx,%llx,%x,%x,%x;%n", &origin, &selected, &generation,
+                &age, &epoch, &consumed);
+            if (fields != 5 || consumed <= 0) break;
             // One persisted record spans one completed sleep/wake boundary.
             const uint64_t aged = (uint64_t)age + 1;
-            associations[slot++] = {
+            if (epochMatches(origin, epoch)) associations[slot++] = {
                 (uint64_t)origin, (uint64_t)selected,
                 (uint32_t)generation,
                 aged > UINT32_MAX ? UINT32_MAX : (uint32_t)aged,
-                startUsec};
+                startUsec, epoch};
             offset += (size_t)consumed;
         }
     }
@@ -452,11 +516,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         char record[64];
         for (const BeaconAssociation &association : associations) {
             if (association.originMac == 0) continue;
-            snprintf(record, sizeof(record), "%llx,%llx,%x,%x;",
+            snprintf(record, sizeof(record), "%llx,%llx,%x,%x,%x;",
                      (unsigned long long)association.originMac,
                      (unsigned long long)association.selectedBeacon,
                      association.originGeneration,
-                     associationAgeCycles(association));
+                     associationAgeCycles(association), association.originEpoch);
             encoded += record;
         }
         spiffsAssociations = encoded;
@@ -464,7 +528,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 
     bool mergeAssociation(uint64_t originMac, uint64_t selectedBeacon,
                           uint32_t originGeneration, uint32_t ageCycles,
-                          bool direct = false) {
+                          bool direct = false, uint32_t originEpoch = 0) {
         associationMergeAttempts++;
         if (originMac == 0 || selectedBeacon == 0) {
             associationMergeInvalid++;
@@ -487,7 +551,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                     return false;
                 }
                 association = {originMac, selectedBeacon, originGeneration,
-                               storedAge, micros()};
+                               storedAge, micros(), originEpoch};
                 associationMergeAccepted++;
                 return true;
             }
@@ -499,7 +563,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             return false;
         }
         associations[empty] = {originMac, selectedBeacon, originGeneration,
-                               storedAge, micros()};
+                               storedAge, micros(), originEpoch};
         associationMergeAccepted++;
         return true;
     }
@@ -779,7 +843,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
     void mergeClaim(uint64_t originMac, uint64_t bssid,
-                    uint32_t originGeneration, int8_t rssi) {
+                    uint32_t originGeneration, int8_t rssi, uint32_t originEpoch) {
         if (originMac == 0 || bssid == 0) return;
         size_t empty = claimTableSize;
         for (size_t i = 0; i < claimTableSize; ++i) {
@@ -791,13 +855,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 claim.originGeneration = originGeneration;
                 claim.rssi = rssi;
                 claim.receivedWakeGeneration = wakeGeneration;
+                claim.originEpoch = originEpoch;
                 return;
             }
             if (empty == claimTableSize && claim.originMac == 0) empty = i;
         }
         if (empty == claimTableSize) return;
         claims[empty] = {originMac, bssid, originGeneration, rssi,
-                         wakeGeneration, wakeGeneration};
+                         wakeGeneration, wakeGeneration, originEpoch};
     }
 
     void onBroadScan(const WifiBeaconPacket &packet) {
@@ -813,7 +878,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             if (packetLog[i].ssid == bssid) {
                 BeaconInfo &info = packetLog[i];
                 recordBeacon(info, packet);
-                mergeClaim(deviceMac, bssid, wakeGeneration, packet.rssi);
+                mergeClaim(deviceMac, bssid, wakeGeneration, packet.rssi, incarnation);
                 return;
             }
         }
@@ -865,7 +930,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         }
         BeaconReportHeader header;
         memcpy(&header, data, sizeof(header));
-        if (header.version != 5) {
+        if (header.version != 6) {
             if (peerSlot >= 0) reportSenderBadVersion[peerSlot]++;
             return;
         }
@@ -874,6 +939,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             reportBadLength++;
             return;
         }
+        if (header.senderMac == deviceMac ||
+            !acceptOrigin(header.senderMac, header.incarnation, true)) return;
         // One sample per peer per exchange keeps serial output bounded.
         if (peerSlot >= 0 && reportSenderValid[peerSlot] == 0)
         out("report-clock-rx sender %012llx incarnation %08x wake %u packet %u local-rx %llu bssid %012llx clock-ms-low %u start-delta-ms %d planned-end-delta-ms %d valid %u",
@@ -884,7 +951,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             (int)header.exchangeStartDeltaMs, (int)header.plannedEndDeltaMs,
             header.timingValid == 1 ? 1U : 0U);
         const bool refreshed = mergeAssociation(header.senderMac, header.selectedBeacon,
-                         header.wakeGeneration, 0, true);
+                         header.wakeGeneration, 0, true, header.incarnation);
         if (peerSlot >= 0 && refreshed) reportSenderAssociationRefresh[peerSlot]++;
         const size_t claimBytesAvailable = length - sizeof(header);
         const size_t available = claimBytesAvailable /
@@ -909,8 +976,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             BeaconClaimEntry entry;
             memcpy(&entry, data + sizeof(header) +
                    i * sizeof(entry), sizeof(entry));
+            // Header already established the sender incarnation. Entries,
+            // including the sender's own, may not contradict it.
+            if (!acceptOrigin(entry.originMac, entry.incarnation, false)) continue;
             mergeClaim(entry.originMac, entry.bssid,
-                       entry.originGeneration, entry.rssi);
+                       entry.originGeneration, entry.rssi, entry.incarnation);
             size_t slot = 0;
             for (; slot < remoteStatsSize; ++slot) {
                 if (remoteStats[slot].bssid == entry.bssid) break;
@@ -950,12 +1020,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             BeaconAssociationEntry entry;
             memcpy(&entry, data + associationOffset +
                    i * sizeof(entry), sizeof(entry));
+            if (!acceptOrigin(entry.originMac, entry.incarnation, false)) continue;
             mergeAssociation(entry.originMac, entry.selectedBeacon,
-                             entry.originGeneration, entry.ageCycles);
+                             entry.originGeneration, entry.ageCycles, false, entry.incarnation);
         }
     }
 
     void dumpExchangePeers() const {
+        out("origin-incarnation rejected %u", epochRejected);
         out("report-framing bad-length %u", reportBadLength);
         out("association-merge attempts %u accepted %u rejected %u invalid %u older-generation %u not-fresher %u table-full %u",
             associationMergeAttempts, associationMergeAccepted,
@@ -1016,9 +1088,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                        reportMaxAssociations *
                            sizeof(BeaconAssociationEntry)] = {};
         mergeAssociation(deviceMac, spiffsBeacon.read(), wakeGeneration,
-                         0, true);
+                         0, true, incarnation);
         BeaconReportHeader header = {};
-        header.version = 5;
+        header.version = 6;
         header.senderMac = deviceMac;
         header.selectedBeacon = spiffsBeacon.read();
         header.wakeGeneration = wakeGeneration;
@@ -1053,7 +1125,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                     claimFreshnessWakes)
                 continue;
             BeaconClaimEntry entry = {claim.originMac, claim.bssid,
-                                      claim.originGeneration, claim.rssi};
+                                      claim.originGeneration, claim.rssi, claim.originEpoch};
             memcpy(buffer + sizeof(header) + count * sizeof(entry),
                    &entry, sizeof(entry));
             count++;
@@ -1075,7 +1147,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             BeaconAssociationEntry entry = {
                 association.originMac, association.selectedBeacon,
                 association.originGeneration,
-                (uint16_t)min(age, (uint32_t)UINT16_MAX)};
+                (uint16_t)min(age, (uint32_t)UINT16_MAX), association.originEpoch};
             memcpy(buffer + associationOffset + associationCount *
                    sizeof(entry), &entry, sizeof(entry));
             associationCount++;
@@ -1228,6 +1300,7 @@ public:
         reportRxClaimCount = 0;
         reportValidRxCount = 0;
         reportBadLength = 0;
+        epochRejected = 0;
         associationMergeAttempts = associationMergeAccepted = 0;
         associationMergeInvalid = associationMergeOlder = 0;
         associationMergeNotFresher = associationMergeFull = 0;
@@ -1261,6 +1334,7 @@ public:
             ESP.getEfuseMac();
 #endif
         SPIFFSVariableESP32Base::begin();
+        loadOrigins();
         loadClaims();
         loadAssociations();
         wakeGeneration = spiffsClaimGeneration.read() + 1;
@@ -1276,7 +1350,8 @@ public:
             if (wakeGeneration == 0) wakeGeneration = 1;
         }
         spiffsClaimGeneration = wakeGeneration;
-        out("report-identity incarnation %08x wake %u wire-version 5 max-packet-bytes 199",
+        acceptOrigin(deviceMac, incarnation, true);
+        out("report-identity incarnation %08x wake %u wire-version 6 max-packet-bytes 176",
             incarnation, wakeGeneration);
         const uint64_t homeBeacon = spiffsBeacon.read();
         targetBeacon = homeBeacon;
@@ -1550,6 +1625,7 @@ public:
         maybeResetAfterStableReunion(homeBssid, healthyExchange);
         saveClaims();
         saveAssociations();
+        saveOrigins();
         beaconCapture.stop();
         esp_sleep_enable_timer_wakeup(sleepUsec);
         esp_deep_sleep_start();
