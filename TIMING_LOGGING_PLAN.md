@@ -1,6 +1,8 @@
 # Rendezvous Timing and Logging Implementation Plan
 
-Status: design agreed; firmware packet changes are not yet implemented.
+Status: host infrastructure, TSF/merge diagnostics, and version-5 sender timing
+are implemented. Version 5 is not deployed; behavioral incarnation handling,
+offline correlation, and interval scheduling remain pending.
 
 ## Review amendments and implementation boundary (2026-09-08)
 
@@ -56,6 +58,48 @@ ESP-NOW initialization order, or board deployment changes in this slice.
 Validation: all five host tests pass (including compiled production merge code
 and TSF projection edge cases); ESP32 build passes. Live diagnostic validation
 remains for the next coordinated deployment.
+
+Third implementation slice (2026-09-08): compact sender timing in wire version
+5, preserving the three-claim/four-association capacity. The old maximum was
+25 + 3*21 + 4*22 + 4 = 180 bytes. The new header is 44 bytes, giving 199 bytes
+including BRPT routing, below ESPNowMux's checked 200-byte limit (no splitting).
+Fields are little-endian fixed-width integers; clock BSSID is six network-order
+octets. The 19-byte addition is incarnation(4), BSSID(6), low TSF milliseconds(4),
+signed start/planned-end deltas(2 each), and validity(1). Full BSSID is retained.
+Offsets subtract separately floored full TSF milliseconds before truncating
+the reference to 32 bits; this preserves wrap-boundary intervals. Overflow,
+underflow, unobserved targets, and deltas beyond int16 invalidate timing rather
+than clipping. These timestamps describe the sender's observed target and
+scheduled window, not proof of radio delivery or actual final transmission.
+
+Identity semantics: `(sender MAC, incarnation, wake generation, packet sequence)`
+identifies a diagnostic sample. A nonzero random incarnation persists across
+deep sleep and ordinary reset; test reset/flash erase or generation wrap starts
+a new incarnation. Random 32-bit identity is probabilistic, not globally unique
+or ordered. Current firmware has one exchange per wake. A future interval
+scheduler needs a distinct exchange sequence once multiple exchanges per wake
+are possible. Logger sessions do not change this identity.
+
+This slice does NOT change claim/association acceptance to use incarnations:
+relayed entries still lack them. Follow-up must propagate origin incarnation,
+allow new direct-origin lifetimes despite lower generations, and prevent old
+relays from rolling an origin back. Do not order random incarnation IDs or
+treat a wire schema version as a freshness generation. The old reset-generation
+rejection issue therefore remains pending, rather than being silently changed
+as part of diagnostic instrumentation.
+
+Receivers validate exact version/count/length framing before merging; malformed
+lengths have a separate counter. Timing is diagnostic only. One receive timing
+sample per peer per exchange and one transmit observation per exchange bound
+new log output; packet fields are refreshed on every send. Missing first-sample
+timing can be revisited with more detailed sampling later. The sender's full
+paired TSF/local observation is logged without truncation.
+
+Validation: six host tests pass, including real packed-header roundtrip/layout,
+packet-size, truncated/extra-byte/count rejection, signed delta limits, invalid
+observations, and 32-bit millisecond rollover. All six boards must move to this
+wire version together at the later coordinated deployment; none changed here.
+The final ESP32 build passes (RAM 89,084 bytes; flash 1,144,234 bytes).
 
 This document records the agreed direction for the next implementation pass.
 The six deployed boards are controlled as one ecosystem: a firmware packet

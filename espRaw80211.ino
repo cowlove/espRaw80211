@@ -2,6 +2,7 @@
 #include "espNowMux.h"
 #include "raw80211Capture.h"
 #include "rendezvousTiming.h"
+#include "beaconReport.h"
 #ifndef ESP32
 #error Only the ESP32 is supported
 #endif
@@ -48,33 +49,9 @@ struct BeaconInfo {
 // Application-level rendezvous advertisement.  Keep this deliberately small:
 // ESPNowMux reserves four bytes for the routing prefix and uses a conservative
 // 200-byte physical packet size.
-struct __attribute__((packed)) BeaconReportHeader {
-    uint8_t version;
-    uint64_t senderMac;
-    uint64_t selectedBeacon;
-    uint32_t wakeGeneration;
-    uint16_t packetSequence;
-    uint8_t claimCount;
-    uint8_t associationCount;
-};
-
-struct __attribute__((packed)) BeaconClaimEntry {
-    uint64_t originMac;
-    uint64_t bssid;
-    uint32_t originGeneration;
-    int8_t rssi;
-};
-
-struct __attribute__((packed)) BeaconAssociationEntry {
-    uint64_t originMac;
-    uint64_t selectedBeacon;
-    uint32_t originGeneration;
-    uint16_t ageCycles;
-};
-
 static_assert(sizeof(BeaconReportHeader) +
               3 * sizeof(BeaconClaimEntry) +
-              4 * sizeof(BeaconAssociationEntry) + 4 <= 200,
+              4 * sizeof(BeaconAssociationEntry) + 4 <= ESPNowMux::physicalPacketBytes,
               "BRPT report exceeds ESPNowMux packet budget");
 
 struct BeaconClaim {
@@ -265,6 +242,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     SPIFFSVariable<uint64_t> spiffsCurrentGoal{"/currentGoal", 0};
     SPIFFSVariable<int> spiffsCurrentRep{"/currentRep", 0};
     SPIFFSVariable<uint32_t> spiffsClaimGeneration{"/claimGen", 0};
+    SPIFFSVariable<uint32_t> spiffsIncarnation{"/incarnation", 0};
     SPIFFSVariable<string> spiffsClaims{"/claims", ""};
     SPIFFSVariable<string> spiffsAssociations{"/associations", ""};
     SPIFFSVariable<int> spiffsScoutPhase{"/scoutPhase", 0};
@@ -287,6 +265,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     BeaconClaim claims[claimTableSize] = {};
     BeaconAssociation associations[associationTableSize] = {};
     uint32_t wakeGeneration = 0;
+    uint32_t incarnation = 0;
+    uint32_t reportBadLength = 0;
     uint16_t reportSequence = 0;
     uint16_t reportTxCount = 0;
     uint16_t reportRxCount = 0;
@@ -327,6 +307,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         spiffsClaims = string("");
         spiffsAssociations = string("");
         spiffsClaimGeneration = (uint32_t)0;
+        spiffsIncarnation = (uint32_t)0;
         spiffsScoutPhase = 0;
         spiffsScoutBeacon = (uint64_t)0;
         spiffsProposalBeacon = (uint64_t)0;
@@ -846,6 +827,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
     void onReport(const uint8_t *from, const uint8_t *data, int length) {
+        const uint64_t reportLocalRx = micros();
         reportRxCount++;
         uint64_t sender = 0;
         if (length >= (int)sizeof(BeaconReportHeader)) {
@@ -883,10 +865,24 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         }
         BeaconReportHeader header;
         memcpy(&header, data, sizeof(header));
-        if (header.version != 4) {
+        if (header.version != 5) {
             if (peerSlot >= 0) reportSenderBadVersion[peerSlot]++;
             return;
         }
+        // Validate the complete framing before changing any association.
+        if (!validReportLength(header, (size_t)length)) {
+            reportBadLength++;
+            return;
+        }
+        // One sample per peer per exchange keeps serial output bounded.
+        if (peerSlot >= 0 && reportSenderValid[peerSlot] == 0)
+        out("report-clock-rx sender %012llx incarnation %08x wake %u packet %u local-rx %llu bssid %012llx clock-ms-low %u start-delta-ms %d planned-end-delta-ms %d valid %u",
+            (unsigned long long)header.senderMac, header.incarnation,
+            header.wakeGeneration, header.packetSequence,
+            (unsigned long long)reportLocalRx,
+            (unsigned long long)reportClockBssid(header), header.clockMsLow,
+            (int)header.exchangeStartDeltaMs, (int)header.plannedEndDeltaMs,
+            header.timingValid == 1 ? 1U : 0U);
         const bool refreshed = mergeAssociation(header.senderMac, header.selectedBeacon,
                          header.wakeGeneration, 0, true);
         if (peerSlot >= 0 && refreshed) reportSenderAssociationRefresh[peerSlot]++;
@@ -960,6 +956,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
     void dumpExchangePeers() const {
+        out("report-framing bad-length %u", reportBadLength);
         out("association-merge attempts %u accepted %u rejected %u invalid %u older-generation %u not-fresher %u table-full %u",
             associationMergeAttempts, associationMergeAccepted,
             associationMergeAttempts - associationMergeAccepted,
@@ -1020,8 +1017,26 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                            sizeof(BeaconAssociationEntry)] = {};
         mergeAssociation(deviceMac, spiffsBeacon.read(), wakeGeneration,
                          0, true);
-        BeaconReportHeader header = {4, deviceMac, spiffsBeacon.read(),
-                                     wakeGeneration, reportSequence++, 0, 0};
+        BeaconReportHeader header = {};
+        header.version = 5;
+        header.senderMac = deviceMac;
+        header.selectedBeacon = spiffsBeacon.read();
+        header.wakeGeneration = wakeGeneration;
+        header.packetSequence = reportSequence++;
+        header.incarnation = incarnation;
+        // Advertise the actual target observation, never substitute home for
+        // an unobserved scout target. Missing or out-of-range timing is invalid.
+        for (const BeaconInfo &info : packetLog) {
+            if (info.ssid != targetBeacon || info.count == 0) continue;
+            setReportTiming(header, info.ssid, info.ts, info.seen2,
+                            espNowStartUsec, espNowEndUsec);
+            if (header.packetSequence == 0)
+            out("report-clock-tx incarnation %08x wake %u packet %u bssid %012llx tsf %llu local-rx %llu valid %u",
+                incarnation, wakeGeneration, header.packetSequence,
+                (unsigned long long)info.ssid, (unsigned long long)info.ts,
+                (unsigned long long)info.seen2, (unsigned)header.timingValid);
+            break;
+        }
         memcpy(buffer, &header, sizeof(header));
         size_t count = 0;
         // Rotate through the longer-lived claim table. Repeated 5 Hz packets
@@ -1212,6 +1227,7 @@ public:
         reportRxCount = 0;
         reportRxClaimCount = 0;
         reportValidRxCount = 0;
+        reportBadLength = 0;
         associationMergeAttempts = associationMergeAccepted = 0;
         associationMergeInvalid = associationMergeOlder = 0;
         associationMergeNotFresher = associationMergeFull = 0;
@@ -1248,7 +1264,20 @@ public:
         loadClaims();
         loadAssociations();
         wakeGeneration = spiffsClaimGeneration.read() + 1;
+        incarnation = spiffsIncarnation.read();
+        if (incarnation == 0 || wakeGeneration == 0) {
+#ifdef CSIM
+            incarnation = (uint32_t)rand();
+#else
+            incarnation = esp_random();
+#endif
+            if (incarnation == 0) incarnation = 1;
+            spiffsIncarnation = incarnation;
+            if (wakeGeneration == 0) wakeGeneration = 1;
+        }
         spiffsClaimGeneration = wakeGeneration;
+        out("report-identity incarnation %08x wake %u wire-version 5 max-packet-bytes 199",
+            incarnation, wakeGeneration);
         const uint64_t homeBeacon = spiffsBeacon.read();
         targetBeacon = homeBeacon;
         scoutWake = false;
