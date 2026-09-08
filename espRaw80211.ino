@@ -296,6 +296,10 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint16_t reportSenderValid[16] = {};
     uint64_t reportSenderFirstUsec[16] = {};
     uint64_t reportSenderLastUsec[16] = {};
+    uint16_t reportSenderShort[16] = {};
+    uint16_t reportSenderBadVersion[16] = {};
+    uint16_t reportSenderAssociationRefresh[16] = {};
+    uint16_t reportSenderClaimEntries[16] = {};
     uint8_t reportSenderCount = 0;
     uint32_t scanParseRejects = 0;
     uint32_t scanAccepted = 0;
@@ -841,18 +845,26 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 reportSenderLastUsec[peerSlot] = micros();
             }
         }
-        if (length < (int)sizeof(BeaconReportHeader)) return;
+        if (length < (int)sizeof(BeaconReportHeader)) {
+            if (peerSlot >= 0) reportSenderShort[peerSlot]++;
+            return;
+        }
         BeaconReportHeader header;
         memcpy(&header, data, sizeof(header));
-        if (header.version != 4) return;
+        if (header.version != 4) {
+            if (peerSlot >= 0) reportSenderBadVersion[peerSlot]++;
+            return;
+        }
         mergeAssociation(header.senderMac, header.selectedBeacon,
                          header.wakeGeneration, 0, true);
+        if (peerSlot >= 0) reportSenderAssociationRefresh[peerSlot]++;
         const size_t claimBytesAvailable = length - sizeof(header);
         const size_t available = claimBytesAvailable /
             sizeof(BeaconClaimEntry);
         const size_t count = min((size_t)header.claimCount,
                                  min(available, reportMaxClaims));
         reportRxClaimCount += count;
+        if (peerSlot >= 0) reportSenderClaimEntries[peerSlot] += count;
         sender = header.senderMac;
         if (sender == 0 && from != nullptr)
             for (int i = 0; i < 6; ++i) sender = (sender << 8) | from[i];
@@ -935,6 +947,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             out("espnow peer %012llx raw %u valid %u first %llu last %llu",
                 (unsigned long long)reportSenders[i], reportSenderRaw[i],
                 reportSenderValid[i],
+                (unsigned long long)reportSenderFirstUsec[i],
+                (unsigned long long)reportSenderLastUsec[i]);
+        for (uint8_t i = 0; i < reportSenderCount; ++i)
+            out("espnow summary source %012llx frames %u valid %u short %u bad-version %u association-refresh %u claim-entries %u first %llu last %llu",
+                (unsigned long long)reportSenders[i],
+                reportSenderRaw[i], reportSenderValid[i],
+                reportSenderShort[i], reportSenderBadVersion[i],
+                reportSenderAssociationRefresh[i], reportSenderClaimEntries[i],
                 (unsigned long long)reportSenderFirstUsec[i],
                 (unsigned long long)reportSenderLastUsec[i]);
         for (const BeaconClaim &claim : claims) {
@@ -1158,6 +1178,11 @@ public:
         memset(reportSenderValid, 0, sizeof(reportSenderValid));
         memset(reportSenderFirstUsec, 0, sizeof(reportSenderFirstUsec));
         memset(reportSenderLastUsec, 0, sizeof(reportSenderLastUsec));
+        memset(reportSenderShort, 0, sizeof(reportSenderShort));
+        memset(reportSenderBadVersion, 0, sizeof(reportSenderBadVersion));
+        memset(reportSenderAssociationRefresh, 0,
+               sizeof(reportSenderAssociationRefresh));
+        memset(reportSenderClaimEntries, 0, sizeof(reportSenderClaimEntries));
         reportSenderCount = 0;
         scanParseRejects = 0;
         scanAccepted = 0;
