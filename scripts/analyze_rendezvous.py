@@ -493,38 +493,46 @@ def print_scout_link_stats(rows) -> None:
 
 
 def print_pairwise_ascii_table(rows, context, board_names) -> None:
-    """Print directed valid-packet throughput; rows receive from columns."""
+    """Print separate directed throughput and healthy-overlap matrices."""
     labels = {
         'scout': 'scout-involved',
         'home': 'home/home',
         'all': 'combined scout + home/home',
     }
     names = sorted(set(board_names))
-    rates = {}
+    cells_by_direction = {}
     for row in rows:
         for receiver, sender, key in (
                 (row['left'], row['right'], 'left_received_from_right'),
                 (row['right'], row['left'], 'right_received_from_left')):
             value = row[key]
             if value['identity_mapped']:
-                rates[(receiver, sender)] = value['valid_per_overlap_second']
+                hit_rate = 100 * value['received_cycles'] / row['opportunities']
+                cells_by_direction[(receiver, sender)] = (
+                    value['valid_per_overlap_second'], hit_rate)
     name_width = max([len('receiver'), *(len(name) for name in names)], default=8)
     cell_width = max(8, *(len(name) for name in names))
-    print(f"ESP-NOW valid packets/second matrix | {labels[context]} same-target overlaps")
-    print(f"{'receiver':<{name_width}} <- | " +
-          ' | '.join(f'{name:>{cell_width}}' for name in names))
-    for receiver in names:
-        cells = []
-        for sender in names:
-            if receiver == sender:
-                cell = '--'
-            elif (receiver, sender) in rates:
-                cell = f'{rates[(receiver, sender)]:.2f}'
-            else:
-                cell = '-'
-            cells.append(f'{cell:>{cell_width}}')
-        print(f'{receiver:<{name_width}} <- | ' + ' | '.join(cells))
-    print('  rows receive from columns; - = no sampled overlap')
+
+    def matrix(title, value_index, formatter):
+        print(f"{title} | {labels[context]} same-target overlaps")
+        print(f"{'receiver':<{name_width}} <- | " +
+              ' | '.join(f'{name:>{cell_width}}' for name in names))
+        for receiver in names:
+            cells = []
+            for sender in names:
+                if receiver == sender:
+                    cell = '--'
+                elif (receiver, sender) in cells_by_direction:
+                    cell = formatter(cells_by_direction[(receiver, sender)][value_index])
+                else:
+                    cell = '-'
+                cells.append(f'{cell:>{cell_width}}')
+            print(f'{receiver:<{name_width}} <- | ' + ' | '.join(cells))
+        print('  rows receive from columns; - = no sampled overlap')
+
+    matrix('ESP-NOW valid packets/second matrix', 0, lambda value: f'{value:.2f}')
+    matrix('ESP-NOW healthy overlap sessions matrix', 1,
+           lambda value: f'{value:.0f}%')
 
 
 def rendezvous_dashboard(name: str, data: bytes) -> bool:
