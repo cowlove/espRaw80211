@@ -30,12 +30,18 @@ class SwarmOracleTests(unittest.TestCase):
             self.assertFalse(analyzer.rendezvous_dashboard('one USB', data(swarm_board_count()-1)))
             self.assertTrue(analyzer.rendezvous_dashboard('one USB', data(swarm_board_count())))
 
-    def test_initial_qualification_and_age(self):
-        required = swarm_board_count()
-        data = (f'2026-09-08T12:00:00-07:00 host_mono_ns=1 board=usb0 port=/dev/x session=s | logger-session x\n'
-                f'2026-09-08T12:01:00-07:00 host_mono_ns=2 board=usb0 port=/dev/x session=s | 00005.0 ESP-NOW exchange phase started\n'
-                f'2026-09-08T12:01:01-07:00 host_mono_ns=3 board=usb0 port=/dev/x session=s | 00010.0 gossip home exchange healthy home abc listeners {required}\n'
-                f'2026-09-08T12:01:02-07:00 host_mono_ns=4 board=usb0 port=/dev/x session=s | 00010.1 deep sleep 20 sec\n').encode()
-        first = analyzer.initial_qualification(data, required)
-        self.assertEqual(first, analyzer.evidence.timestamp('2026-09-08T12:01:00-07:00'))
+    def test_global_home_convergence_ignores_listener_count(self):
+        def data(board, minute, homes):
+            lines = []
+            for i, home in enumerate(homes):
+                stamp = f'2026-09-08T12:{minute+i:02d}:00-07:00'
+                prefix = f'{stamp} host_mono_ns={i+1} board={board} port=/dev/x session=s | '
+                lines.extend([prefix + '00005.0 ESP-NOW exchange phase started',
+                              prefix + f'00010.0 gossip home exchange healthy home {home} listeners 1',
+                              prefix + '00010.1 deep sleep 20 sec'])
+            return ('\n'.join(lines) + '\n').encode()
+        datasets = [('a', data('a', 0, ['aaa', 'bbb'])),
+                    ('b', data('b', 0, ['aaa', 'bbb']))]
+        events = analyzer.global_home_convergences(datasets, 2)
+        self.assertEqual([event['bssid'] for event in events], ['aaa', 'bbb'])
         self.assertEqual(analyzer.human_age(3661), '1h1m')

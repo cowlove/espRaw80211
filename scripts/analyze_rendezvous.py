@@ -215,13 +215,38 @@ def human_age(seconds: float) -> str:
     return f"{seconds}s"
 
 
-def initial_qualification(data: bytes, required: int) -> float | None:
-    """First timestamped healthy required-listener cycle in retained input."""
-    for cycle in evidence.parse_evidence(data)[0]:
-        if (cycle.wall is not None and cycle.health == 'healthy' and
-                cycle.listeners is not None and cycle.listeners >= required):
-            return cycle.wall
-    return None
+def global_home_convergences(datasets, required: int, max_skew: float = 90):
+    """Return transitions where every logged board's recent home agrees.
+
+    This is an observational test oracle. It does not use listener counts and
+    cannot account for unlogged boards, even when the artificial swarm size is
+    larger than the number of serial logs.
+    """
+    observations = []
+    board_names = {name for name, _ in datasets}
+    for name, data in datasets:
+        for cycle in evidence.parse_evidence(data)[0]:
+            if cycle.wall is not None and cycle.home:
+                observations.append((cycle.wall, name, cycle.home))
+    observations.sort()
+    latest = {}
+    active_bssid = None
+    events = []
+    for wall, name, home in observations:
+        latest[name] = (wall, home)
+        homes = {value[1] for value in latest.values()}
+        times = [value[0] for value in latest.values()]
+        converged = (len(board_names) >= required and
+                     len(latest) == len(board_names) and len(homes) == 1 and
+                     max(times) - min(times) <= max_skew)
+        if converged:
+            bssid = next(iter(homes))
+            if active_bssid != bssid:
+                events.append({'host_time': wall, 'bssid': bssid})
+            active_bssid = bssid
+        else:
+            active_bssid = None
+    return events
 
 
 def rendezvous_dashboard(name: str, data: bytes) -> bool:
@@ -235,11 +260,7 @@ def rendezvous_dashboard(name: str, data: bytes) -> bool:
         return False
     latest = cycles[-1]
     state = "QUALIFIED" if qualified and qualified[-1] is latest else "not-qualified"
-    first = initial_qualification(data, required)
-    first_text = "none-in-retained-tail" if first is None else (
-        f"{datetime.fromtimestamp(first).astimezone().isoformat(timespec='seconds')} "
-        f"age={human_age(time.time()-first)}")
-    print(f"{name:<12} rendezvous={state:<12} artificial-test-board-count={required} qualified={len(qualified):3d}  latest-home={latest.home}  latest-listeners={latest.listeners}  latest-exchange={'healthy' if latest.healthy else 'incomplete'}  first-7/7={first_text}")
+    print(f"{name:<12} rendezvous={state:<12} artificial-test-board-count={required} qualified={len(qualified):3d}  latest-home={latest.home}  latest-listeners={latest.listeners}  latest-exchange={'healthy' if latest.healthy else 'incomplete'}")
     return state == "QUALIFIED"
 
 
@@ -329,6 +350,13 @@ def main() -> int:
             current_dashboard(name, data)
         print("Observed rendezvous | independent of TEST RESET decisions")
         observed = [rendezvous_dashboard(name, data) for name, data in datasets]
+        global_events = global_home_convergences(datasets, swarm_board_count())
+        print("Global 7/7 home convergence events | same BSSID, listeners ignored")
+        if not global_events:
+            print("  none in retained tails")
+        for event in global_events:
+            stamp = datetime.fromtimestamp(event['host_time']).astimezone().isoformat(timespec='seconds')
+            print(f"  {stamp}  age={human_age(time.time()-event['host_time'])}  home={event['bssid']}")
         print(f"LATEST RECORDS {'all qualified (not necessarily simultaneous)' if all(observed) else 'not all qualified'}")
     else:
         print(f"Rendezvous dashboard | last {args.recent} complete cycles | KPI = exchange-start → deep-sleep")
