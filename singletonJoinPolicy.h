@@ -5,14 +5,20 @@
 
 namespace SingletonJoinPolicy {
 
-// Called only after a healthy, fully covered direct scout appointment.
-// One board at home may join any observed destination group of two or more.
+// Positive evidence is useful even when a scout appointment began late. A
+// missing packet during a partial appointment is not negative evidence.
+inline bool mayEvaluateScout(uint32_t directPacketsSelectingTarget) {
+    return directPacketsSelectingTarget > 0;
+}
+
+// Called after direct scout traffic confirms that at least one sender selected
+// the target. One board at home may join an observed group of two or more.
 inline bool mayAdopt(size_t homeMembers, size_t destinationMembers) {
     return homeMembers == 1 && destinationMembers >= 2;
 }
 
-// Established groups only consider a destination observed during a direct,
-// healthy scout visit, and only when that group is strictly larger.
+// Established groups only consider a destination supported by direct positive
+// scout evidence, and only when that group is strictly larger.
 inline bool mayPropose(size_t homeMembers, size_t destinationMembers) {
     return homeMembers >= 2 && destinationMembers > homeMembers;
 }

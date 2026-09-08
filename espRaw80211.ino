@@ -370,6 +370,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint16_t reportSenderShort[16] = {};
     uint16_t reportSenderBadVersion[16] = {};
     uint16_t reportSenderAssociationRefresh[16] = {};
+    uint64_t reportSenderSelectedBeacon[16] = {};
     uint32_t associationMergeAttempts = 0;
     uint32_t associationMergeAccepted = 0;
     uint32_t associationMergeInvalid = 0;
@@ -1126,6 +1127,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         const bool refreshed = mergeAssociation(header.senderMac, header.selectedBeacon,
                          header.wakeGeneration, 0, true, header.incarnation);
         if (peerSlot >= 0 && refreshed) reportSenderAssociationRefresh[peerSlot]++;
+        if (peerSlot >= 0) reportSenderSelectedBeacon[peerSlot] = header.selectedBeacon;
         const size_t claimBytesAvailable = length - sizeof(header);
         const size_t available = claimBytesAvailable /
             sizeof(BeaconClaimEntry);
@@ -1344,6 +1346,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         return txHealthy && reportValidRxCount >= 3 && reportSenderCount > 0;
     }
 
+    uint32_t directPacketsSelecting(uint64_t bssid) const {
+        uint32_t packets = 0;
+        for (uint8_t i = 0; i < reportSenderCount; ++i)
+            if (reportSenderSelectedBeacon[i] == bssid)
+                packets += reportSenderValid[i];
+        return packets;
+    }
+
     void advanceRoundClock(uint64_t now) {
         const uint64_t elapsed = roundClock.tick(now, defaultRendezvousUsec);
         if (!elapsed) return;
@@ -1392,6 +1402,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         memset(reportSenderShort, 0, sizeof(reportSenderShort));
         memset(reportSenderBadVersion, 0, sizeof(reportSenderBadVersion));
         memset(reportSenderAssociationRefresh, 0, sizeof(reportSenderAssociationRefresh));
+        memset(reportSenderSelectedBeacon, 0, sizeof(reportSenderSelectedBeacon));
         memset(reportSenderClaimEntries, 0, sizeof(reportSenderClaimEntries));
         memset(reportSenderRadioMismatch, 0, sizeof(reportSenderRadioMismatch));
         reportSenderCount = 0;
@@ -1629,8 +1640,12 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                         spiffsRoundHome = a.bssid;
                     }
                 } else if (!a.home) {
-                    if (healthy && state.full)
+                    const uint32_t positivePackets = directPacketsSelecting(a.bssid);
+                    if (SingletonJoinPolicy::mayEvaluateScout(positivePackets))
                         adoptDirectlyObservedGroup(plannedHome, a.bssid);
+                    out("scout-positive-evidence target %012llx packets %u full %u",
+                        (unsigned long long)a.bssid, positivePackets,
+                        state.full ? 1U : 0U);
                     spiffsScoutCursor = a.bssid;
                     spiffsScoutBeacon = (uint64_t)0;
                     spiffsLastScoutRound = wakeGeneration;
@@ -1835,6 +1850,8 @@ public:
         memset(reportSenderBadVersion, 0, sizeof(reportSenderBadVersion));
         memset(reportSenderAssociationRefresh, 0,
                sizeof(reportSenderAssociationRefresh));
+        memset(reportSenderSelectedBeacon, 0,
+               sizeof(reportSenderSelectedBeacon));
         memset(reportSenderClaimEntries, 0, sizeof(reportSenderClaimEntries));
         memset(reportSenderRadioMismatch, 0, sizeof(reportSenderRadioMismatch));
         reportSenderCount = 0;

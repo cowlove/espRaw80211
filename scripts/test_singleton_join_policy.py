@@ -14,6 +14,9 @@ class SingletonJoinPolicyTests(unittest.TestCase):
 #include "singletonJoinPolicy.h"
 using namespace SingletonJoinPolicy;
 int main() {
+    assert(!mayEvaluateScout(0));
+    assert(mayEvaluateScout(1));
+    assert(mayEvaluateScout(20));
     assert(!mayAdopt(0, 2));
     assert(!mayAdopt(1, 0));
     assert(!mayAdopt(1, 1));

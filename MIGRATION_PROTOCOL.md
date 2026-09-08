@@ -7,17 +7,9 @@ decision path, and the known tradeoffs.
 
 ## Implementation status
 
-There are currently two closely related versions of the scout evidence gate:
-
-1. **Deployed board-farm firmware (`c91e293`)** requires a scout appointment to
-   be both `healthy` and `full` before using it for a migration decision.
-2. **Current CSIM experiment (uncommitted)** accepts positive evidence from a
-   partial scout. At least one valid, directly received ESP-NOW report must say
-   that its sender selected the scout target. Missing packets during a partial
-   scout are not negative evidence.
-
-All other migration rules described below are shared. The CSIM experiment is
-the proposed behavior, but it has not yet been committed or deployed.
+The policy accepts positive evidence from a partial scout. At least one valid,
+directly received ESP-NOW report must say that its sender selected the scout
+target. Missing packets during a partial scout are not negative evidence.
 
 ## Purpose and desired invariants
 
@@ -78,7 +70,7 @@ both directly learned and relayed fresh associations.
 
 ### Direct positive scout evidence
 
-In the current CSIM experiment, a scout has positive evidence when at least one
+In the current implementation, a scout has positive evidence when at least one
 valid packet was directly received from a sender whose report header says its
 `selectedBeacon` equals the scout target.
 
@@ -127,8 +119,7 @@ RSSI and packet count do not authorize a home change.
 ### 2. Direct ESP-NOW reports during a scout
 
 A valid report identifies its physical sender and the sender's selected beacon.
-This is the positive trigger for evaluating the scout target in the proposed
-CSIM behavior.
+This is the positive trigger for evaluating the scout target.
 
 ### 3. Fresh association table
 
@@ -157,7 +148,7 @@ but received packets remain real observations.
 
 ## Complete decision flow
 
-The proposed CSIM behavior can be summarized as:
+The current behavior can be summarized as:
 
 ```text
 complete scout appointment
@@ -178,8 +169,8 @@ complete scout appointment
                        -> reject the target, or cancel its pending proposal
 ```
 
-The deployed version inserts `healthy && full` before the evaluation. The
-experiment replaces that binary coverage gate with positive packet evidence.
+There is no `healthy && full` prerequisite for scout evaluation. Positive
+packet evidence is the gate; coverage remains diagnostic context.
 
 ## Singleton behavior
 
@@ -307,7 +298,7 @@ that no one was present, because the board missed part of the window. But a
 valid report actually received during that visit is still direct proof that its
 sender was present and selected that beacon.
 
-The experimental gate therefore uses:
+The current gate therefore uses:
 
 ```text
 direct valid packet advertising scout target -> consider migration
@@ -360,8 +351,7 @@ full:                  0
 valid target packets:  5
 home estimate:         3
 target estimate:       4
-result in deployed firmware: ignored
-result in CSIM experiment: migration proposal evaluated
+result: migration proposal evaluated from positive direct evidence
 ```
 
 ### Partial scout with no traffic
@@ -477,4 +467,3 @@ on healthy full home completion(home):
     else if current round >= proposal.activation:
         commitHome(proposal.target)
 ```
-
