@@ -113,6 +113,7 @@ struct RemoteBeaconStats {
 #endif
 static_assert(CONTEXT_COUNT == CsimPairwiseData::boardCount,
               "CSIM context count must match generated pairwise data");
+static uint64_t csimMaximumAwakeUsec = 0;
 // Application-owned RF world. Each destination selects one environment, so
 // simulated devices can observe different BSSIDs and beacon clocks while the
 // capture HAL remains unaware of the RF model.
@@ -140,6 +141,7 @@ class BeaconSimulationEnvironment : public Csim_Module {
     } destinations[CONTEXT_COUNT] = {};
     size_t destinationCount = 0;
     uint64_t blackoutAfterUsec = 0;
+    uint64_t blackoutUntilUsec = 0;
 
 public:
     BeaconSimulationEnvironment() {
@@ -164,6 +166,14 @@ public:
         if (strcmp(*arg, "--beacon-blackout-after") == 0) {
             const double seconds = atof(*(++arg));
             blackoutAfterUsec = seconds > 0 ?
+                (uint64_t)(seconds * 1000000.0) : 0;
+        } else if (strcmp(*arg, "--beacon-blackout-until") == 0) {
+            const double seconds = atof(*(++arg));
+            blackoutUntilUsec = seconds > 0 ?
+                (uint64_t)(seconds * 1000000.0) : 0;
+        } else if (strcmp(*arg, "--max-awake-seconds") == 0) {
+            const double seconds = atof(*(++arg));
+            csimMaximumAwakeUsec = seconds > 0 ?
                 (uint64_t)(seconds * 1000000.0) : 0;
         }
     }
@@ -213,7 +223,8 @@ public:
         // Diagnostic fault injection: keep firmware awake without refreshing
         // beacon timing so long-running scheduler behavior (including the
         // ESP32's 32-bit micros() rollover) can be reproduced in CSIM.
-        if (blackoutAfterUsec && now >= blackoutAfterUsec) return;
+        if (blackoutAfterUsec && now >= blackoutAfterUsec &&
+            (!blackoutUntilUsec || now < blackoutUntilUsec)) return;
         for (uint8_t environmentId = 0; environmentId < CONTEXT_COUNT;
              ++environmentId) {
             for (size_t j = 0; j < environments[environmentId].count; ++j) {
@@ -282,6 +293,10 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     // usable beacon has been observed.
     static constexpr uint64_t beaconSamplingWindowUsec = 5ULL * 1000000ULL;
     static constexpr uint64_t exchangeWindowUsec = 5ULL * 1000000ULL;
+    static constexpr uint32_t timingRecoveryBlindSleeps = 2;
+    static constexpr uint64_t timingRecoverySleepUsec =
+        defaultRendezvousUsec - beaconSamplingWindowUsec;
+    static constexpr uint64_t maximumAwakeUsec = 120ULL * 1000000ULL;
 
     BeaconInfo packetLog[packetLogSize] = {};
     SPIFFSVariable<uint64_t> spiffsBeacon{"/beaconX", 0};
@@ -297,6 +312,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     SPIFFSVariable<uint32_t> spiffsLastScoutRound{"/lastScout7", 0};
     SPIFFSVariable<int> spiffsRoundHealthy{"/roundHealthy7", 0};
     SPIFFSVariable<uint64_t> spiffsRoundHome{"/roundHome7", 0};
+    SPIFFSVariable<uint32_t> spiffsTimingRecovery{"/timingRecovery", 0};
+    SPIFFSVariable<int> spiffsStrongestRecovery{"/strongestRecovery", 0};
     RendezvousExecutor::RoundClock roundClock;
     RendezvousPlanner::Plan<4> executionPlan{1000000};
     RendezvousExecutor::Coverage coverage[4] = {};
@@ -387,6 +404,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         spiffsLastScoutRound = (uint32_t)0;
         spiffsRoundHealthy = 0;
         spiffsRoundHome = (uint64_t)0;
+        spiffsTimingRecovery = (uint32_t)0;
+        spiffsStrongestRecovery = 0;
         spiffsScoutPhase = 0;
         spiffsScoutBeacon = (uint64_t)0;
         spiffsProposalBeacon = (uint64_t)0;
@@ -1391,13 +1410,18 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     bool makeExecutionPlan(uint64_t now) {
         uint64_t home = spiffsBeacon.read();
         if (!home) {
-            const int best = randomStartupBeaconIndex();
+            const int best = spiffsStrongestRecovery.read() ?
+                strongestImmediateBeaconIndex() : randomStartupBeaconIndex();
             if (!packetLog[best].count || !packetLog[best].ssid) return false;
             home = packetLog[best].ssid;
             spiffsBeacon = home;
+            if (spiffsStrongestRecovery.read())
+                out("timing-recovery strongest selected %012llx rssi %d packets %d",
+                    (unsigned long long)home, packetLog[best].rssi,
+                    packetLog[best].count);
         }
         const BeaconInfo *timing = freshTiming(home, now);
-        if (!timing) return false; // stay awake acquiring home, never substitute a scout
+        if (!timing) return false; // recovery preserves home before strongest fallback
         executionPlan = RendezvousPlanner::Plan<4>(1000000);
         const uint64_t period = defaultRendezvousUsec;
         RendezvousPlanner::Appointment first, second, scout;
@@ -1438,10 +1462,57 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         plannedHome = home;
         plannedPeriod = period;
         executionPlanned = true;
+        spiffsTimingRecovery = (uint32_t)0;
+        spiffsStrongestRecovery = 0;
         out("interval-plan home %012llx appointments %u intervals %u awake-usec %llu",
             (unsigned long long)home, (unsigned)executionPlan.appointmentCount(),
             (unsigned)executionPlan.intervalCount(), (unsigned long long)executionPlan.awakeUsec());
         return true;
+    }
+
+    void sleepForTimingRecovery(uint64_t duration) {
+        advanceRoundClock(steadyMicros());
+        saveClaims(); saveAssociations(); saveOrigins();
+        spiffsRoundElapsed = roundClock.remainder + duration;
+        spiffsSleepTime = duration;
+        spiffsClaimGeneration = wakeGeneration;
+        out("deep sleep %.3f sec timing-recovery", duration / 1000000.0);
+        fflush(stdout);
+#ifndef CSIM
+        uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
+#endif
+        beaconCapture.stop();
+        esp_sleep_enable_timer_wakeup(duration);
+        esp_deep_sleep_start();
+    }
+
+    void recoverMissingHomeTiming() {
+        const uint32_t failures = spiffsTimingRecovery.read() + 1;
+        spiffsTimingRecovery = failures;
+        if (failures > timingRecoveryBlindSleeps) {
+            out("timing-recovery fallback strongest after %u misses", failures);
+            spiffsBeacon = (uint64_t)0;
+            spiffsStrongestRecovery = 1;
+        } else {
+            out("timing-recovery blind sleep %u/%u preserving home %012llx",
+                failures, timingRecoveryBlindSleeps,
+                (unsigned long long)spiffsBeacon.read());
+        }
+        sleepForTimingRecovery(timingRecoverySleepUsec);
+    }
+
+    void maximumAwakeRestart() {
+        out("maximum-awake restart after %.3f sec",
+            (steadyMicros() - startUsec) / 1000000.0);
+        fflush(stdout);
+#ifdef CSIM
+        beaconCapture.stop();
+        esp_sleep_enable_timer_wakeup(1000);
+        esp_deep_sleep_start();
+#else
+        uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
+        esp_restart();
+#endif
     }
 
     void sleepForExecutor(uint64_t duration) {
@@ -1467,6 +1538,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 
     void intervalExecutorLoop(uint64_t now) {
         advanceRoundClock(now);
+        uint64_t maximum = maximumAwakeUsec;
+#ifdef CSIM
+        if (csimMaximumAwakeUsec) maximum = csimMaximumAwakeUsec;
+#endif
+        if (now - startUsec >= maximum) {
+            maximumAwakeRestart();
+            return;
+        }
         if (!spiffsIncarnation.read()) {
             saveClaims(); saveAssociations(); saveOrigins();
             beaconCapture.stop();
@@ -1475,6 +1554,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             return;
         }
         if (now-startUsec < beaconSamplingWindowUsec) { delay(1); return; }
+        if (!executionPlanned) {
+            if (now < nextPlanUsec) { delay(1); return; }
+            if (!makeExecutionPlan(now)) {
+                recoverMissingHomeTiming();
+                return;
+            }
+        }
         if (!espNowStarted) {
             // Preserve beacon-only acquisition before the first ESP-NOW init:
             // Jim observed early init suppressing promiscuous beacon callbacks.
@@ -1483,14 +1569,6 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 const uint8_t *data, int length) { onReport(from, data, length); });
             espNowStarted = true;
             return;
-        }
-        if (!executionPlanned) {
-            if (now < nextPlanUsec) { delay(1); return; }
-            if (!makeExecutionPlan(now)) {
-                nextPlanUsec = now + 1000000;
-                out("interval-plan waiting for fresh home timing");
-                delay(1); return;
-            }
         }
         if (executionInterval >= executionPlan.intervalCount()) {
             executionPlanned = false;
@@ -1634,6 +1712,20 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             if (packetLog[i].ssid != 0 && score(packetLog[i]) >= score(packetLog[best]))
                 best = (int)i;
         return best;
+    }
+
+    int strongestImmediateBeaconIndex() const {
+        int strongest = -1;
+        for (size_t i = 0; i < packetLogSize; ++i) {
+            const BeaconInfo &info = packetLog[i];
+            if (info.ssid == 0 || info.rssi < reportMinRssi ||
+                info.count < minimumCandidatePackets)
+                continue;
+            if (strongest < 0 || louderStartupBeacon(info,
+                                                     packetLog[strongest]))
+                strongest = (int)i;
+        }
+        return strongest < 0 ? bestBeaconIndex() : strongest;
     }
 
     static bool louderStartupBeacon(const BeaconInfo &a,
