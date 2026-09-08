@@ -9,6 +9,7 @@
 #include "singletonJoinPolicy.h"
 #include "rendezvousExecutor.h"
 #include "testSwarmConfig.h"
+#include "csimPairwiseModel.h"
 #ifndef ESP32
 #error Only the ESP32 is supported
 #endif
@@ -99,21 +100,27 @@ struct RemoteBeaconStats {
 #ifndef CONTEXT_COUNT
 #define CONTEXT_COUNT 4
 #endif
+static_assert(CONTEXT_COUNT == CsimPairwiseData::boardCount,
+              "CSIM context count must match generated pairwise data");
 // Application-owned RF world. Each destination selects one environment, so
 // simulated devices can observe different BSSIDs and beacon clocks while the
 // capture HAL remains unaware of the RF model.
 class BeaconSimulationEnvironment : public Csim_Module {
     struct SimBeacon {
         uint64_t bssid;
-        int8_t rssi;
+        float rssi;
+        float rssiVariation;
+        float packetsPerSecond;
+        float packetRateVariation;
         uint8_t channel;
-        uint32_t intervalUsec;
         uint64_t tsfOrigin;
         uint32_t tsfRatePpm;
         uint64_t nextUsec;
+        uint64_t randomState;
     };
     struct Environment {
-        SimBeacon beacons[2];
+        SimBeacon beacons[CsimPairwiseData::maxBeaconsPerBoard];
+        size_t count;
     } environments[CONTEXT_COUNT] = {};
     struct Destination {
         CsimWifiBeaconCaptureSource *capture;
@@ -125,30 +132,25 @@ class BeaconSimulationEnvironment : public Csim_Module {
 public:
     BeaconSimulationEnvironment() {
         for (uint8_t i = 0; i < CONTEXT_COUNT; ++i) {
-            const uint64_t bssidBase = 0x000096ce0000ULL +
-                ((uint64_t)i << 8);
-            const uint64_t tsfOrigin = 1000000ULL +
-                (uint64_t)i * 16000000ULL;
-            const uint32_t tsfRatePpm = 1000000 +
-                (int32_t)((i % 5) - 2) * 150;
-            environments[i].beacons[0] =
-                {bssidBase + 2, (int8_t)(-38 - (i % 5)), 4, 51200,
-                 tsfOrigin, tsfRatePpm, 0};
-            // Split the fleet into two physically valid rendezvous groups.
-            // Each client has a louder unique distractor, while all clients
-            // in its half see exactly the same weaker beacon and clock.
-            const bool secondHalf = i >= (CONTEXT_COUNT + 1) / 2;
-            environments[i].beacons[1] = secondHalf
-                ? SimBeacon{0x000096ce0fb2ULL, -68, 4, 102400,
-                            29000000, 999850, 0}
-                : SimBeacon{0x000096ce0fa1ULL, -66, 4, 102400,
-                            7000000, 1000125, 0};
+            environments[i].count = CsimPairwiseData::beaconCount[i];
+            for (size_t j = 0; j < environments[i].count; ++j) {
+                const CsimPairwiseData::BeaconEnvironment &source =
+                    CsimPairwiseData::beacons[i][j];
+                const uint64_t hash = CsimPairwiseModel::mix(source.bssid);
+                environments[i].beacons[j] = {
+                    source.bssid, source.rssi, source.rssiVariation,
+                    source.packetsPerSecond, source.packetRateVariation, 4,
+                    1000000ULL + hash % 30000000ULL,
+                    (uint32_t)(999800 + hash % 401), 0,
+                    CsimPairwiseModel::mix(hash ^ i)
+                };
+            }
         }
     }
 
     uint64_t absoluteUsec() const { return sim().bootTimeUsec + micros(); }
 
-    void emit(const SimBeacon &beacon, uint64_t emissionUsec,
+    void emit(SimBeacon &beacon, uint64_t emissionUsec,
               const Destination &destination) {
         if (destination.environmentId >= CONTEXT_COUNT ||
             destination.channel != beacon.channel)
@@ -167,7 +169,13 @@ public:
         // time internal to the simulator and present the same clock shape as
         // the hardware callback.
         packet.localTimestampUsec = emissionUsec - sim().bootTimeUsec;
-        packet.rssi = beacon.rssi;
+        beacon.randomState = CsimPairwiseModel::mix(
+            beacon.randomState + emissionUsec);
+        const float unit = (beacon.randomState >> 11) /
+            (float)(1ULL << 53);
+        const float sampledRssi = beacon.rssi +
+            (unit * 2.0f - 1.0f) * 1.732051f * beacon.rssiVariation;
+        packet.rssi = (int8_t)max(-127.0f, min(0.0f, sampledRssi));
         packet.channel = beacon.channel;
         packet.data = frame;
         packet.length = sizeof(frame);
@@ -184,13 +192,21 @@ public:
         const uint64_t now = absoluteUsec();
         for (uint8_t environmentId = 0; environmentId < CONTEXT_COUNT;
              ++environmentId) {
-            for (SimBeacon &beacon : environments[environmentId].beacons) {
+            for (size_t j = 0; j < environments[environmentId].count; ++j) {
+                SimBeacon &beacon = environments[environmentId].beacons[j];
                 if (beacon.nextUsec == 0) beacon.nextUsec = now;
                 while (now >= beacon.nextUsec) {
                     for (size_t i = 0; i < destinationCount; ++i)
                         if (destinations[i].environmentId == environmentId)
                             emit(beacon, beacon.nextUsec, destinations[i]);
-                    beacon.nextUsec += beacon.intervalUsec;
+                    beacon.randomState = CsimPairwiseModel::mix(
+                        beacon.randomState + beacon.nextUsec);
+                    const float unit = (beacon.randomState >> 11) /
+                        (float)(1ULL << 53);
+                    const float rate = max(0.1f, beacon.packetsPerSecond +
+                        (unit * 2.0f - 1.0f) * 1.732051f *
+                        beacon.packetRateVariation);
+                    beacon.nextUsec += (uint64_t)(1000000.0f / rate);
                 }
             }
         }
@@ -1478,6 +1494,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             espNowEndUsec = interval.end;
             nextReportUsec = now;
             exchangeActive = true;
+#ifdef CSIM
+            CsimPairwiseModel::beginWindow(deviceMac, exchangeSequence);
+#endif
             out("report-identity incarnation %08x wake %u wire-version 7 exchange %u",
                 incarnation, wakeGeneration, exchangeSequence);
             out("ESP-NOW exchange phase started interval %u planned %llu-%llu",
@@ -1539,6 +1558,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         dumpExchangePeers();
         dumpAssociationTable(home);
         out("exchange complete interval %u", exchangeSequence);
+#ifdef CSIM
+        CsimPairwiseModel::endWindow(deviceMac);
+#endif
         exchangeActive = false;
         ++executionInterval;
         if (home != plannedHome || !spiffsIncarnation.read()) executionPlanned = false;
@@ -1807,6 +1829,16 @@ public:
 };
 
 #ifdef CSIM
+struct PairwiseModelInstaller {
+    PairwiseModelInstaller() {
+        sim().espnowDeliveryFailureHook =
+            [](uint64_t sender, uint64_t receiver) {
+                return CsimPairwiseModel::drop(sender, receiver);
+            };
+    }
+};
+static PairwiseModelInstaller pairwiseModelInstaller;
+
 struct ContextFleet {
     BeaconRendezvousContext *contexts[CONTEXT_COUNT] = {};
 

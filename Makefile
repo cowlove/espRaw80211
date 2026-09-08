@@ -1,5 +1,6 @@
 BOARD ?= esp32
-CONTEXT_COUNT ?= 4
+# The generated empirical CSIM model owns the default simulated fleet size.
+CONTEXT_COUNT ?= $(shell sed -n 's/.*boardCount = \([0-9][0-9]*\).*/\1/p' csimPairwiseData.h)
 
 ifeq ($(BOARD),esp32)
 CHIP=esp32

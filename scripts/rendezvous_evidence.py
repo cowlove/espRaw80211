@@ -8,6 +8,10 @@ PREFIX = re.compile(r'^(\S+) host_mono_ns=(\d+) board=(\S+) port=(\S+) session=(
 IDENTITY = re.compile(r'report-identity incarnation ([0-9a-f]+) wake (\d+) wire-version (\d+)(?: exchange (\d+))?')
 WINDOW = re.compile(r'beacon-clock target ([0-9a-f]+) tsf-packet (\d+) exchange (\d+)-(\d+)')
 APPOINTMENT = re.compile(r'appointment complete exchange (\d+) kind (home|scout) target ([0-9a-f]+) full (\d+) healthy (\d+)')
+SCAN_OBSERVED = re.compile(
+    r'matrix scan-observed beacon ([0-9a-f]+) packets (\d+) '
+    r'span ([0-9.]+) sec .*?rssi avg (-?\d+) min (-?\d+) max (-?\d+) '
+    r'eligible (yes|no)')
 
 
 def timestamp(value):
@@ -83,6 +87,7 @@ class Exchange:
     appointment_targets: set = field(default_factory=set)
     scout_targets: set = field(default_factory=set)
     home_targets: set = field(default_factory=set)
+    scan_observed: list = field(default_factory=list)
     end_wall: float | None = None
 
 
@@ -154,6 +159,14 @@ def parse_evidence(data):
                 current.scout_targets.add(found[3])
             else:
                 current.home_targets.add(found[3])
+        found = SCAN_OBSERVED.search(body)
+        if found:
+            bssid, packets, span, average, minimum, maximum, eligible = found.groups()
+            current.scan_observed.append({
+                'bssid': bssid, 'packets': int(packets), 'span': float(span),
+                'rssi': int(average), 'minimum_rssi': int(minimum),
+                'maximum_rssi': int(maximum), 'eligible': eligible == 'yes',
+            })
         if 'deep sleep ' in body or 'exchange complete interval ' in body:
             current.end_wall = wall
             complete.append(current)

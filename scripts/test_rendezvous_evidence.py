@@ -3,6 +3,8 @@ import rendezvous_evidence as evidence
 import analyze_rendezvous as analyzer
 import contextlib
 import io
+import tempfile
+from pathlib import Path
 
 
 def line(body, session='s1', second=0):
@@ -167,6 +169,26 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn('1.40', table)  # a receives 7 packets during 5 seconds
         self.assertIn('1.00', table)  # b receives 5 packets during 5 seconds
         self.assertIn('100%', table)
+        with tempfile.TemporaryDirectory() as directory:
+            header = Path(directory) / 'links.h'
+            scan = line('00010.0 matrix scan-observed beacon abc packets 25 '
+                        'span 5.000 sec maxgap 0.2 sec rssi avg -60 min -65 '
+                        'max -55 eligible yes')
+            parsed = {
+                'a': evidence.parse_evidence(cycle(epoch='aa', extra=scan, wire=7)),
+                'b': evidence.parse_evidence(cycle(epoch='bb', extra=scan, wire=7)),
+            }
+            analyzer.write_csim_pairwise_header(
+                header, combined_rows, ['a', 'b'], parsed)
+            generated = header.read_text()
+            self.assertIn('boardCount = 2', generated)
+            self.assertIn('packetsPerSecond', generated)
+            self.assertIn('healthyWindowPercent', generated)
+            self.assertIn('BeaconEnvironment', generated)
+            self.assertIn('{0xabcULL, -60.000f, 0.000f, 5.000000f', generated)
+            with self.assertRaises(ValueError):
+                analyzer.write_csim_pairwise_header(header, combined_rows,
+                                                    ['a', 'b', 'unsampled'])
 
     def test_historical_usb_swaps_remap_to_current_alias(self):
         def observed(epoch, sender):
