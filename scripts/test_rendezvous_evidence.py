@@ -62,6 +62,12 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.summarize(data)['complete_cycles'], 1)
         self.assertEqual(evidence.summarize(data)['partial_cycles'], 1)
 
+    def test_all_sessions_without_time_filter_is_zero_copy(self):
+        data = cycle()
+        selected, warnings = evidence.select(data, session='all')
+        self.assertIs(selected, data)
+        self.assertEqual(warnings, [])
+
     def test_time_selection_and_tail_warning(self):
         data = cycle(second=10)
         selected, warnings = evidence.select(data, since=evidence.timestamp('2026-09-08T10:00:11Z'))

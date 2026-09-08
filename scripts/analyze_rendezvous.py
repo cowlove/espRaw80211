@@ -103,7 +103,7 @@ def read_remote(host: str, path: str, tail_bytes: int) -> bytes:
     # A nonpositive limit is an explicit, potentially expensive full-history read.
     quoted = ('"$HOME"/' + shlex.quote(path[2:])) if path.startswith('~/') else shlex.quote(path)
     reader = f"cat -- {quoted}" if tail_bytes <= 0 else f"tail -c {tail_bytes} -- {quoted}"
-    cmd = ["ssh", "-x", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+    cmd = ["ssh", "-C", "-x", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
            host, reader]
     try:
         timeout = 300 if tail_bytes <= 0 else 30
@@ -257,7 +257,7 @@ def global_home_convergences(datasets, required: int, max_skew: float = 90):
     return events
 
 
-def current_home_distribution(datasets):
+def current_home_distribution(datasets, summaries=None):
     """Group each logged board's latest observed home by BSSID.
 
     This is an observational snapshot of boards with serial logs, not global
@@ -267,7 +267,8 @@ def current_home_distribution(datasets):
     groups = defaultdict(list)
     unknown = []
     for name, data in datasets:
-        latest = evidence.summarize(data)['latest'] or {}
+        latest = ((summaries[name] if summaries is not None else
+                   evidence.summarize(data))['latest'] or {})
         home = latest.get('home')
         if home and home != '-':
             groups[home].append(name)
@@ -281,7 +282,7 @@ def current_home_distribution(datasets):
     return rows, sorted(unknown)
 
 
-def current_home_unchanged_cycles(datasets) -> int:
+def current_home_unchanged_cycles(datasets, parsed=None) -> int:
     """Count completed wake observations in the current full assignment.
 
     A distribution includes which logged board occupies which BSSID, not merely
@@ -292,7 +293,8 @@ def current_home_unchanged_cycles(datasets) -> int:
     board_names = {name for name, _ in datasets}
     observations = []
     for name, data in datasets:
-        for cycle in evidence.parse_evidence(data)[0]:
+        cycles = parsed[name][0] if parsed is not None else evidence.parse_evidence(data)[0]
+        for cycle in cycles:
             if cycle.wall is not None and cycle.home:
                 observations.append((cycle.wall, name, cycle.home))
     observations.sort()
@@ -314,9 +316,9 @@ def current_home_unchanged_cycles(datasets) -> int:
     return stable_cycles
 
 
-def print_current_home_distribution(datasets) -> None:
-    rows, unknown = current_home_distribution(datasets)
-    stable_cycles = current_home_unchanged_cycles(datasets)
+def print_current_home_distribution(datasets, summaries=None, parsed=None) -> None:
+    rows, unknown = current_home_distribution(datasets, summaries)
+    stable_cycles = current_home_unchanged_cycles(datasets, parsed)
     print('Current home distribution | latest observation per logged board | '
           f'unchanged in {stable_cycles} completed wake cycles (retained tails)')
     if not rows:
@@ -327,14 +329,13 @@ def print_current_home_distribution(datasets) -> None:
         print(f"  unknown-home devices={len(unknown)}  boards={','.join(unknown)}")
 
 
-def pairwise_link_stats(datasets, context='scout'):
-    """Measure directed delivery for scout, home/home, or all overlaps."""
-    if context not in ('scout', 'home', 'all'):
-        raise ValueError(f'unknown link context: {context}')
+def pairwise_link_stats_all(datasets, parsed_evidence=None):
+    """Measure all link contexts with one parse and a time-window sweep."""
     # Legacy formats lack the exchange identity and appointment semantics needed
     # to establish a scout opportunity. Never mix them into this statistic.
     parsed = {
-        name: [cycle for cycle in evidence.parse_evidence(data)[0]
+        name: [cycle for cycle in (parsed_evidence[name][0] if parsed_evidence is not None
+                                   else evidence.parse_evidence(data)[0])
                if cycle.wire is not None and cycle.wire >= SCOUT_LINK_MIN_WIRE_VERSION]
         for name, data in datasets
     }
@@ -358,58 +359,81 @@ def pairwise_link_stats(datasets, context='scout'):
         if len(owners) == 1:
             board_origins[next(iter(owners))].add(origin)
 
-    rows = []
+    rows = {context: [] for context in ('scout', 'home', 'all')}
     for left, right in combinations(sorted(parsed), 2):
-        opportunities = []
-        for a in parsed[left]:
-            if a.wall is None or a.end_wall is None or not a.appointment_targets:
-                continue
-            for b in parsed[right]:
-                if b.wall is None or b.end_wall is None or not b.appointment_targets:
-                    continue
+        left_cycles = sorted(
+            (cycle for cycle in parsed[left]
+             if cycle.wall is not None and cycle.end_wall is not None and
+             cycle.appointment_targets), key=lambda cycle: cycle.wall)
+        right_cycles = sorted(
+            (cycle for cycle in parsed[right]
+             if cycle.wall is not None and cycle.end_wall is not None and
+             cycle.appointment_targets), key=lambda cycle: cycle.wall)
+        opportunities = {context: [] for context in rows}
+        first_possible = 0
+        for a in left_cycles:
+            while (first_possible < len(right_cycles) and
+                   right_cycles[first_possible].end_wall <= a.wall):
+                first_possible += 1
+            candidate = first_possible
+            while candidate < len(right_cycles) and right_cycles[candidate].wall < a.end_wall:
+                b = right_cycles[candidate]
+                candidate += 1
                 scout_targets = ((a.scout_targets & b.appointment_targets) |
                                  (b.scout_targets & a.appointment_targets))
                 home_targets = a.home_targets & b.home_targets
-                if context == 'scout':
-                    targets = scout_targets
-                elif context == 'home':
-                    targets = home_targets
-                else:
-                    targets = scout_targets | home_targets
                 overlap = min(a.end_wall, b.end_wall) - max(a.wall, b.wall)
-                if targets and overlap > 0:
-                    opportunities.append((a, b, overlap, sorted(targets)))
-        if not opportunities:
-            continue
+                if overlap <= 0:
+                    continue
+                if scout_targets:
+                    opportunities['scout'].append((a, b, overlap, sorted(scout_targets)))
+                if home_targets:
+                    opportunities['home'].append((a, b, overlap, sorted(home_targets)))
+                all_targets = scout_targets | home_targets
+                if all_targets:
+                    opportunities['all'].append((a, b, overlap, sorted(all_targets)))
 
-        def direction(receiver_cycles, sender):
-            values = []
-            raw_values = []
-            known = bool(board_origins[sender])
-            for receiver in receiver_cycles:
-                peer_rows = [receiver.peers[origin] for origin in board_origins[sender]
-                             if origin in receiver.peers]
-                values.append(sum(int(peer.get('valid', 0)) for peer in peer_rows))
-                raw_values.append(sum(int(peer.get('frames', 0)) for peer in peer_rows))
-            return {
-                'identity_mapped': known,
-                'received_cycles': sum(value > 0 for value in values),
-                'valid_packets': sum(values),
-                'raw_packets': sum(raw_values),
-                'valid_per_opportunity': sum(values) / len(values),
-                'valid_per_overlap_second':
-                    sum(values) / sum(item[2] for item in opportunities),
-            }
+        for context, context_opportunities in opportunities.items():
+            if not context_opportunities:
+                continue
 
-        rows.append({
-            'left': left, 'right': right,
-            'opportunities': len(opportunities),
-            'overlap_seconds': sum(item[2] for item in opportunities),
-            'targets': sorted({target for item in opportunities for target in item[3]}),
-            'left_received_from_right': direction([item[0] for item in opportunities], right),
-            'right_received_from_left': direction([item[1] for item in opportunities], left),
-        })
+            def direction(receiver_cycles, sender):
+                values = []
+                raw_values = []
+                known = bool(board_origins[sender])
+                for receiver in receiver_cycles:
+                    peer_rows = [receiver.peers[origin] for origin in board_origins[sender]
+                                 if origin in receiver.peers]
+                    values.append(sum(int(peer.get('valid', 0)) for peer in peer_rows))
+                    raw_values.append(sum(int(peer.get('frames', 0)) for peer in peer_rows))
+                return {
+                    'identity_mapped': known,
+                    'received_cycles': sum(value > 0 for value in values),
+                    'valid_packets': sum(values),
+                    'raw_packets': sum(raw_values),
+                    'valid_per_opportunity': sum(values) / len(values),
+                    'valid_per_overlap_second':
+                        sum(values) / sum(item[2] for item in context_opportunities),
+                }
+
+            rows[context].append({
+                'left': left, 'right': right,
+                'opportunities': len(context_opportunities),
+                'overlap_seconds': sum(item[2] for item in context_opportunities),
+                'targets': sorted({target for item in context_opportunities for target in item[3]}),
+                'left_received_from_right': direction(
+                    [item[0] for item in context_opportunities], right),
+                'right_received_from_left': direction(
+                    [item[1] for item in context_opportunities], left),
+            })
     return rows
+
+
+def pairwise_link_stats(datasets, context='scout'):
+    """Measure directed delivery for one requested overlap context."""
+    if context not in ('scout', 'home', 'all'):
+        raise ValueError(f'unknown link context: {context}')
+    return pairwise_link_stats_all(datasets)[context]
 
 
 def scout_link_stats(datasets):
@@ -514,12 +538,14 @@ def main() -> int:
         for note in notes:
             print(f'{name}: {note}', file=sys.stderr)
     if args.evidence or args.overlaps or args.scout_links or args.json:
-        summaries = {name: evidence.summarize(data) for name, data in datasets}
-        home_distribution, unknown_homes = current_home_distribution(datasets)
-        home_distribution_unchanged_cycles = current_home_unchanged_cycles(datasets)
+        parsed_evidence = {name: evidence.parse_evidence(data) for name, data in datasets}
+        summaries = {name: evidence.summarize(data, parsed_evidence[name])
+                     for name, data in datasets}
+        home_distribution, unknown_homes = current_home_distribution(datasets, summaries)
+        home_distribution_unchanged_cycles = current_home_unchanged_cycles(
+            datasets, parsed_evidence)
         pairs = evidence.overlaps(datasets) if args.overlaps else []
-        link_stats = ({context: pairwise_link_stats(datasets, context)
-                       for context in ('scout', 'home', 'all')}
+        link_stats = (pairwise_link_stats_all(datasets, parsed_evidence)
                       if args.scout_links else {})
         scout_links = link_stats.get('scout', [])
         caveats = ['Overlap is same-BSSID planned-window evidence, not proof of radio delivery.',
@@ -539,7 +565,7 @@ def main() -> int:
                               'pairwise_links': link_stats,
                               'warnings': warnings, 'caveats': caveats}, indent=2))
         else:
-            print_current_home_distribution(datasets)
+            print_current_home_distribution(datasets, summaries, parsed_evidence)
             for name, summary in summaries.items():
                 latest = summary['latest'] or {}
                 print(f"{name:<12} cycles={summary['complete_cycles']} partial={summary['partial_cycles']} "

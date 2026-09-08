@@ -31,6 +31,11 @@ def records(data):
 
 
 def select(data, session='latest', since=None, until=None):
+    # Full-history analysis commonly requests the entire capture. Avoid
+    # decoding, splitting, retaining, and re-encoding hundreds of MB only to
+    # return identical bytes.
+    if session == 'all' and since is None and until is None:
+        return data, []
     rows = list(records(data))
     sessions = list(dict.fromkeys(row[1] for row in rows if row[1]))
     chosen = sessions[-1] if session == 'latest' and sessions else session
@@ -148,8 +153,8 @@ def parse_evidence(data):
     return complete, partial
 
 
-def summarize(data):
-    cycles, partial = parse_evidence(data)
+def summarize(data, parsed=None):
+    cycles, partial = parsed if parsed is not None else parse_evidence(data)
     epochs = [c.epoch for c in cycles if c.epoch]
     changes = sum(a != b for a, b in zip(epochs, epochs[1:]))
     merge = {}
