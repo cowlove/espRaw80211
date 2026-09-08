@@ -24,6 +24,7 @@ END = "deep sleep "
 GOSSIP = re.compile(r"gossip .*? exchange (healthy|incomplete).*? home ([0-9a-f]+) listeners (\d+)")
 CONSENSUS = re.compile(r"test consensus (\d+)/10")
 DEFAULT_TAIL_BYTES = 1_000_000
+SCOUT_LINK_MIN_WIRE_VERSION = 7
 
 
 @dataclass
@@ -99,11 +100,14 @@ def parse(data: bytes, limit: int) -> list[Cycle]:
 
 def read_remote(host: str, path: str, tail_bytes: int) -> bytes:
     # tail avoids transferring multi-day serial logs while preserving recent cycles.
+    # A nonpositive limit is an explicit, potentially expensive full-history read.
     quoted = ('"$HOME"/' + shlex.quote(path[2:])) if path.startswith('~/') else shlex.quote(path)
+    reader = f"cat -- {quoted}" if tail_bytes <= 0 else f"tail -c {tail_bytes} -- {quoted}"
     cmd = ["ssh", "-x", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-           host, f"tail -c {tail_bytes} -- {quoted}"]
+           host, reader]
     try:
-        return subprocess.run(cmd, check=True, capture_output=True, timeout=30).stdout
+        timeout = 300 if tail_bytes <= 0 else 30
+        return subprocess.run(cmd, check=True, capture_output=True, timeout=timeout).stdout
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         print(f"remote read failed ({host}:{path}): {(exc.stderr or b'').decode(errors='replace').strip()}", file=sys.stderr)
         return b""
@@ -111,6 +115,8 @@ def read_remote(host: str, path: str, tail_bytes: int) -> bytes:
 
 def read_local_tail(path: Path, tail_bytes: int) -> bytes:
     """Read at most the requested suffix without loading the whole log."""
+    if tail_bytes <= 0:
+        return path.read_bytes()
     size = path.stat().st_size
     with path.open('rb') as stream:
         stream.seek(max(0, size - tail_bytes))
@@ -323,7 +329,13 @@ def print_current_home_distribution(datasets) -> None:
 
 def scout_link_stats(datasets):
     """Measure directed packet delivery during same-target scout overlaps."""
-    parsed = {name: evidence.parse_evidence(data)[0] for name, data in datasets}
+    # Legacy formats lack the exchange identity and appointment semantics needed
+    # to establish a scout opportunity. Never mix them into this statistic.
+    parsed = {
+        name: [cycle for cycle in evidence.parse_evidence(data)[0]
+               if cycle.wire is not None and cycle.wire >= SCOUT_LINK_MIN_WIRE_VERSION]
+        for name, data in datasets
+    }
     epoch_owners = defaultdict(set)
     for name, cycles in parsed.items():
         for cycle in cycles:
@@ -432,7 +444,7 @@ def main() -> int:
     ap.add_argument("--remote-host", default="miner6.local")
     ap.add_argument("--remote-dir", default="~/src/espRaw80211")
     ap.add_argument("--tail-bytes", type=int, default=DEFAULT_TAIL_BYTES,
-                    help="maximum suffix read per log (default: 1000000)")
+                    help="maximum suffix read per log; 0 or -1 reads the full file (default: 1000000)")
     ap.add_argument("--convergence", action="store_true", help="show cycles from reset execution to next 10/10 consensus")
     ap.add_argument("--session", default="latest", help="latest (default), all, or an exact logger session ID")
     ap.add_argument("--since", help="inclusive ISO host timestamp with timezone")
@@ -444,8 +456,8 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="machine-readable evidence and optional overlaps")
     ap.add_argument("--local-only", action="store_true", help="do not read Miner6")
     args = ap.parse_args()
-    if args.recent < 0 or args.tail_bytes <= 0:
-        ap.error('--recent must be nonnegative and --tail-bytes positive')
+    if args.recent < 0 or args.tail_bytes < -1:
+        ap.error('--recent must be nonnegative and --tail-bytes must be -1 or greater')
     try:
         since = evidence.timestamp(args.since) if args.since else None
         until = evidence.timestamp(args.until) if args.until else None

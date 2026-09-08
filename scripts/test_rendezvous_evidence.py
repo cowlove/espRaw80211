@@ -11,9 +11,11 @@ def line(body, session='s1', second=0):
 
 
 def cycle(epoch='aa', wake=1, bssid='abc', start=1000000, end=6000000,
-          second=0, extra=b'', session='s1', kind='home', end_second=None):
+          second=0, extra=b'', session='s1', kind='home', end_second=None,
+          wire=6):
+    identity_suffix = ' exchange 1' if wire >= 7 else ''
     return b''.join([
-        line(f'00000.1 report-identity incarnation {epoch} wake {wake} wire-version 6', session, second),
+        line(f'00000.1 report-identity incarnation {epoch} wake {wake} wire-version {wire}{identity_suffix}', session, second),
         line('00005.0 ESP-NOW exchange phase started', session, second),
         extra,
         line(f'00010.0 beacon-clock target {bssid} tsf-packet 100 exchange {start}-{end}', session, second),
@@ -109,17 +111,22 @@ class EvidenceTests(unittest.TestCase):
         b_extra = (line('00006.0 report-clock-rx sender aaa incarnation aa wake 1 packet 0 local-rx 6000000 bssid abc valid 1 exchange 1') +
                    line('00009.0 espnow summary origin aaa radio-from aaa frames 6 valid 5 short 1'))
         scout_rows = analyzer.scout_link_stats([
-            ('a', cycle(epoch='aa', extra=a_extra, kind='scout', end_second=5)),
-            ('b', cycle(epoch='bb', extra=b_extra, kind='home', end_second=5)),
+            ('a', cycle(epoch='aa', extra=a_extra, kind='scout', end_second=5, wire=7)),
+            ('b', cycle(epoch='bb', extra=b_extra, kind='home', end_second=5, wire=7)),
         ])
         self.assertEqual(len(scout_rows), 1)
         self.assertEqual(scout_rows[0]['left_received_from_right']['valid_packets'], 7)
         self.assertEqual(scout_rows[0]['right_received_from_left']['valid_packets'], 5)
         home_rows = analyzer.scout_link_stats([
-            ('a', cycle(epoch='aa', extra=a_extra, end_second=5)),
-            ('b', cycle(epoch='bb', extra=b_extra, end_second=5)),
+            ('a', cycle(epoch='aa', extra=a_extra, end_second=5, wire=7)),
+            ('b', cycle(epoch='bb', extra=b_extra, end_second=5, wire=7)),
         ])
         self.assertEqual(home_rows, [])
+        legacy_rows = analyzer.scout_link_stats([
+            ('a', cycle(epoch='aa', extra=a_extra, kind='scout', end_second=5)),
+            ('b', cycle(epoch='bb', extra=b_extra, kind='home', end_second=5)),
+        ])
+        self.assertEqual(legacy_rows, [])
 
 
 if __name__ == '__main__':
