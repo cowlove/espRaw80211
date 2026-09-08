@@ -128,6 +128,7 @@ class BeaconSimulationEnvironment : public Csim_Module {
         uint8_t environmentId;
     } destinations[CONTEXT_COUNT] = {};
     size_t destinationCount = 0;
+    uint64_t blackoutAfterUsec = 0;
 
 public:
     BeaconSimulationEnvironment() {
@@ -145,6 +146,14 @@ public:
                     CsimPairwiseModel::mix(hash ^ i)
                 };
             }
+        }
+    }
+
+    void parseArg(char **&arg, char **) override {
+        if (strcmp(*arg, "--beacon-blackout-after") == 0) {
+            const double seconds = atof(*(++arg));
+            blackoutAfterUsec = seconds > 0 ?
+                (uint64_t)(seconds * 1000000.0) : 0;
         }
     }
 
@@ -190,6 +199,10 @@ public:
 
     void loop() override {
         const uint64_t now = absoluteUsec();
+        // Diagnostic fault injection: keep firmware awake without refreshing
+        // beacon timing so long-running scheduler behavior (including the
+        // ESP32's 32-bit micros() rollover) can be reproduced in CSIM.
+        if (blackoutAfterUsec && now >= blackoutAfterUsec) return;
         for (uint8_t environmentId = 0; environmentId < CONTEXT_COUNT;
              ++environmentId) {
             for (size_t j = 0; j < environments[environmentId].count; ++j) {
