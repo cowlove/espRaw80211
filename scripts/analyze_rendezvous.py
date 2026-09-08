@@ -327,8 +327,10 @@ def print_current_home_distribution(datasets) -> None:
         print(f"  unknown-home devices={len(unknown)}  boards={','.join(unknown)}")
 
 
-def scout_link_stats(datasets):
-    """Measure directed packet delivery during same-target scout overlaps."""
+def pairwise_link_stats(datasets, context='scout'):
+    """Measure directed delivery for scout, home/home, or all overlaps."""
+    if context not in ('scout', 'home', 'all'):
+        raise ValueError(f'unknown link context: {context}')
     # Legacy formats lack the exchange identity and appointment semantics needed
     # to establish a scout opportunity. Never mix them into this statistic.
     parsed = {
@@ -365,8 +367,15 @@ def scout_link_stats(datasets):
             for b in parsed[right]:
                 if b.wall is None or b.end_wall is None or not b.appointment_targets:
                     continue
-                targets = ((a.scout_targets & b.appointment_targets) |
-                           (b.scout_targets & a.appointment_targets))
+                scout_targets = ((a.scout_targets & b.appointment_targets) |
+                                 (b.scout_targets & a.appointment_targets))
+                home_targets = a.home_targets & b.home_targets
+                if context == 'scout':
+                    targets = scout_targets
+                elif context == 'home':
+                    targets = home_targets
+                else:
+                    targets = scout_targets | home_targets
                 overlap = min(a.end_wall, b.end_wall) - max(a.wall, b.wall)
                 if targets and overlap > 0:
                     opportunities.append((a, b, overlap, sorted(targets)))
@@ -388,6 +397,8 @@ def scout_link_stats(datasets):
                 'valid_packets': sum(values),
                 'raw_packets': sum(raw_values),
                 'valid_per_opportunity': sum(values) / len(values),
+                'valid_per_overlap_second':
+                    sum(values) / sum(item[2] for item in opportunities),
             }
 
         rows.append({
@@ -401,8 +412,18 @@ def scout_link_stats(datasets):
     return rows
 
 
-def print_scout_link_stats(rows) -> None:
-    print('Scout ESP-NOW pairwise delivery | same-target overlapping intervals only')
+def scout_link_stats(datasets):
+    """Backward-compatible scout-only pairwise view."""
+    return pairwise_link_stats(datasets, 'scout')
+
+
+def print_pairwise_link_stats(rows, context) -> None:
+    labels = {
+        'scout': 'scout-involved',
+        'home': 'home/home',
+        'all': 'combined scout + home/home',
+    }
+    print(f"ESP-NOW pairwise delivery | {labels[context]} same-target overlaps")
     if not rows:
         print('  no qualifying scout overlaps in retained tails')
         return
@@ -419,7 +440,13 @@ def print_scout_link_stats(rows) -> None:
             reliability = 100 * value['received_cycles'] / row['opportunities']
             print(f"    {receiver} <- {sender}: hit={value['received_cycles']}/{row['opportunities']} "
                   f"({reliability:.0f}%) valid/opportunity={value['valid_per_opportunity']:.1f} "
+                  f"valid/second={value['valid_per_overlap_second']:.2f} "
                   f"valid={value['valid_packets']} raw={value['raw_packets']}")
+
+
+def print_scout_link_stats(rows) -> None:
+    """Backward-compatible printer used by callers and older tests."""
+    print_pairwise_link_stats(rows, 'scout')
 
 
 def rendezvous_dashboard(name: str, data: bytes) -> bool:
@@ -451,8 +478,8 @@ def main() -> int:
     ap.add_argument("--until", help="inclusive ISO host timestamp with timezone")
     ap.add_argument("--evidence", action="store_true", help="summarize reception, merges and incarnations")
     ap.add_argument("--overlaps", action="store_true", help="compare same-BSSID planned exchange windows")
-    ap.add_argument("--scout-links", action="store_true",
-                    help="show pairwise ESP-NOW delivery during same-target scout overlaps")
+    ap.add_argument("--scout-links", "--pairwise-links", dest="scout_links",
+                    action="store_true", help="show scout, home/home, and combined pairwise ESP-NOW delivery")
     ap.add_argument("--json", action="store_true", help="machine-readable evidence and optional overlaps")
     ap.add_argument("--local-only", action="store_true", help="do not read Miner6")
     args = ap.parse_args()
@@ -491,13 +518,16 @@ def main() -> int:
         home_distribution, unknown_homes = current_home_distribution(datasets)
         home_distribution_unchanged_cycles = current_home_unchanged_cycles(datasets)
         pairs = evidence.overlaps(datasets) if args.overlaps else []
-        scout_links = scout_link_stats(datasets) if args.scout_links else []
+        link_stats = ({context: pairwise_link_stats(datasets, context)
+                       for context in ('scout', 'home', 'all')}
+                      if args.scout_links else {})
+        scout_links = link_stats.get('scout', [])
         caveats = ['Overlap is same-BSSID planned-window evidence, not proof of radio delivery.',
                    'Host clocks must be approximately aligned; 15-second host-time gate applied.',
                    'Epoch rejection totals include normal self-origin relay rejection.',
                    'Absence of a sampled packet is not proof that no packet arrived.']
         if args.scout_links:
-            caveats.append('Scout-link packet counts cover the complete merged radio interval containing the qualifying scout overlap.')
+            caveats.append('Pairwise packet counts cover the complete merged radio interval containing each qualifying overlap.')
         if args.json:
             print(json.dumps({'boards': summaries,
                               'current_home_distribution': home_distribution,
@@ -506,6 +536,7 @@ def main() -> int:
                               'unknown_home_boards': unknown_homes,
                               'overlaps': pairs,
                               'scout_links': scout_links,
+                              'pairwise_links': link_stats,
                               'warnings': warnings, 'caveats': caveats}, indent=2))
         else:
             print_current_home_distribution(datasets)
@@ -523,7 +554,8 @@ def main() -> int:
                 for pair in pairs[-20:]:
                     print(json.dumps(pair, sort_keys=True))
             if args.scout_links:
-                print_scout_link_stats(scout_links)
+                for context in ('scout', 'home', 'all'):
+                    print_pairwise_link_stats(link_stats[context], context)
             for note in caveats:
                 print('Note: ' + note)
         return 0

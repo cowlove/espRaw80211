@@ -122,6 +122,20 @@ class EvidenceTests(unittest.TestCase):
             ('b', cycle(epoch='bb', extra=b_extra, end_second=5, wire=7)),
         ])
         self.assertEqual(home_rows, [])
+        steady_rows = analyzer.pairwise_link_stats([
+            ('a', cycle(epoch='aa', extra=a_extra, end_second=5, wire=7)),
+            ('b', cycle(epoch='bb', extra=b_extra, end_second=5, wire=7)),
+        ], 'home')
+        self.assertEqual(len(steady_rows), 1)
+        self.assertEqual(steady_rows[0]['left_received_from_right']['valid_packets'], 7)
+        self.assertAlmostEqual(
+            steady_rows[0]['left_received_from_right']['valid_per_overlap_second'],
+            7 / 5)
+        combined_rows = analyzer.pairwise_link_stats([
+            ('a', cycle(epoch='aa', extra=a_extra, kind='scout', end_second=5, wire=7)),
+            ('b', cycle(epoch='bb', extra=b_extra, kind='home', end_second=5, wire=7)),
+        ], 'all')
+        self.assertEqual(len(combined_rows), 1)
         legacy_rows = analyzer.scout_link_stats([
             ('a', cycle(epoch='aa', extra=a_extra, kind='scout', end_second=5)),
             ('b', cycle(epoch='bb', extra=b_extra, kind='home', end_second=5)),
