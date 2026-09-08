@@ -19,6 +19,7 @@ START = "ESP-NOW exchange phase started"
 END = "deep sleep "
 GOSSIP = re.compile(r"gossip .*? exchange (healthy|incomplete).*? home ([0-9a-f]+) listeners (\d+)")
 CONSENSUS = re.compile(r"test consensus (\d+)/10")
+DEFAULT_TAIL_BYTES = 1_000_000
 
 
 @dataclass
@@ -102,6 +103,16 @@ def read_remote(host: str, path: str, tail_bytes: int) -> bytes:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         print(f"remote read failed ({host}:{path}): {(exc.stderr or b'').decode(errors='replace').strip()}", file=sys.stderr)
         return b""
+
+
+def read_local_tail(path: Path, tail_bytes: int) -> tuple[bytes, bool]:
+    """Read at most the requested suffix without loading the whole log."""
+    size = path.stat().st_size
+    truncated = size > tail_bytes
+    with path.open('rb') as stream:
+        stream.seek(max(0, size - tail_bytes))
+        data = stream.read(tail_bytes)
+    return data, truncated
 
 
 def dashboard(name: str, data: bytes, limit: int) -> None:
@@ -211,7 +222,8 @@ def main() -> int:
     ap.add_argument("--log-dir", type=Path, default=Path(__file__).resolve().parents[1])
     ap.add_argument("--remote-host", default="miner6.local")
     ap.add_argument("--remote-dir", default="~/src/espRaw80211")
-    ap.add_argument("--tail-bytes", type=int, default=8_000_000)
+    ap.add_argument("--tail-bytes", type=int, default=DEFAULT_TAIL_BYTES,
+                    help="maximum suffix read per log (default: 1000000)")
     ap.add_argument("--convergence", action="store_true", help="show cycles from reset execution to next 10/10 consensus")
     ap.add_argument("--session", default="latest", help="latest (default), all, or an exact logger session ID")
     ap.add_argument("--since", help="inclusive ISO host timestamp with timezone")
@@ -238,17 +250,18 @@ def main() -> int:
         i = int(match.group(1))
         data = b''
         if path.exists():
-            with path.open('rb') as stream:
-                stream.seek(max(0, path.stat().st_size - args.tail_bytes))
-                data = stream.read()
-        raw.append((f'local usb{i}', data))
+            data, truncated = read_local_tail(path, args.tail_bytes)
+        else:
+            truncated = False
+        raw.append((f'local usb{i}', data, truncated))
     if not args.local_only:
         for i in range(2):
-            raw.append((f'miner6 usb{i}', read_remote(args.remote_host,
-                       f'{args.remote_dir}/cat.usb{i}.out', args.tail_bytes)))
-    for name, data in raw:
+            data = read_remote(args.remote_host,
+                               f'{args.remote_dir}/cat.usb{i}.out', args.tail_bytes)
+            raw.append((f'miner6 usb{i}', data, len(data) >= args.tail_bytes))
+    for name, data, truncated in raw:
         selected, notes = evidence.select(data, args.session, since, until)
-        if len(data) >= args.tail_bytes:
+        if truncated:
             notes.append('input byte limit reached; older history may be missing')
         warnings[name] = notes
         datasets.append((name, selected))
