@@ -492,6 +492,41 @@ def print_scout_link_stats(rows) -> None:
     print_pairwise_link_stats(rows, 'scout')
 
 
+def print_pairwise_ascii_table(rows, context, board_names) -> None:
+    """Print directed valid-packet throughput; rows receive from columns."""
+    labels = {
+        'scout': 'scout-involved',
+        'home': 'home/home',
+        'all': 'combined scout + home/home',
+    }
+    names = sorted(set(board_names))
+    rates = {}
+    for row in rows:
+        for receiver, sender, key in (
+                (row['left'], row['right'], 'left_received_from_right'),
+                (row['right'], row['left'], 'right_received_from_left')):
+            value = row[key]
+            if value['identity_mapped']:
+                rates[(receiver, sender)] = value['valid_per_overlap_second']
+    name_width = max([len('receiver'), *(len(name) for name in names)], default=8)
+    cell_width = max(8, *(len(name) for name in names))
+    print(f"ESP-NOW valid packets/second matrix | {labels[context]} same-target overlaps")
+    print(f"{'receiver':<{name_width}} <- | " +
+          ' | '.join(f'{name:>{cell_width}}' for name in names))
+    for receiver in names:
+        cells = []
+        for sender in names:
+            if receiver == sender:
+                cell = '--'
+            elif (receiver, sender) in rates:
+                cell = f'{rates[(receiver, sender)]:.2f}'
+            else:
+                cell = '-'
+            cells.append(f'{cell:>{cell_width}}')
+        print(f'{receiver:<{name_width}} <- | ' + ' | '.join(cells))
+    print('  rows receive from columns; - = no sampled overlap')
+
+
 def rendezvous_dashboard(name: str, data: bytes) -> bool:
     """Apply an ARTIFICIAL test oracle, not a discoverable global membership."""
     required = swarm_board_count()
@@ -523,9 +558,15 @@ def main() -> int:
     ap.add_argument("--overlaps", action="store_true", help="compare same-BSSID planned exchange windows")
     ap.add_argument("--scout-links", "--pairwise-links", dest="scout_links",
                     action="store_true", help="show scout, home/home, and combined pairwise ESP-NOW delivery")
+    ap.add_argument("--ascii-table", action="store_true",
+                    help="with pairwise links, additionally print directed packets/second matrices")
     ap.add_argument("--json", action="store_true", help="machine-readable evidence and optional overlaps")
     ap.add_argument("--local-only", action="store_true", help="do not read Miner6")
     args = ap.parse_args()
+    if args.ascii_table:
+        args.scout_links = True
+    if args.ascii_table and args.json:
+        ap.error('--ascii-table cannot be combined with --json')
     if args.recent < 0 or args.tail_bytes < -1:
         ap.error('--recent must be nonnegative and --tail-bytes must be -1 or greater')
     try:
@@ -601,6 +642,10 @@ def main() -> int:
             if args.scout_links:
                 for context in ('scout', 'home', 'all'):
                     print_pairwise_link_stats(link_stats[context], context)
+                    if args.ascii_table:
+                        print_pairwise_ascii_table(
+                            link_stats[context], context,
+                            [name for name, _ in datasets])
             for note in caveats:
                 print('Note: ' + note)
         return 0

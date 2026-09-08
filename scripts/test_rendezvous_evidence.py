@@ -157,6 +157,15 @@ class EvidenceTests(unittest.TestCase):
         ])
         self.assertEqual(legacy_rows, [])
 
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            analyzer.print_pairwise_ascii_table(scout_rows, 'scout', ['a', 'b', 'c'])
+        table = output.getvalue()
+        self.assertIn('valid packets/second matrix', table)
+        self.assertIn('rows receive from columns', table)
+        self.assertIn('1.40', table)  # a receives 7 packets during 5 seconds
+        self.assertIn('1.00', table)  # b receives 5 packets during 5 seconds
+
     def test_historical_usb_swaps_remap_to_current_alias(self):
         def observed(epoch, sender):
             return line(f'00006.0 report-clock-rx sender {sender} incarnation {epoch} '
