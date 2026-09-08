@@ -120,6 +120,8 @@ def deploy(
     )
     monitor = (
         f"make -C {shlex.quote(str(project))} BOARD=esp32 UPLOAD_PORT={session.port} cat "
+        f"| python3 {shlex.quote(str(project / 'scripts/timestamp_serial.py'))} "
+        f"--board {shlex.quote(session.name)} --port {shlex.quote(session.port)} "
         f"| tee -a {shlex.quote(str(project / session.logfile))}"
     )
     print(f"{session.name}: {session.port} -> {session.logfile}")
