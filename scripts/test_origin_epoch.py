@@ -24,6 +24,7 @@ class OriginEpochTests(unittest.TestCase):
 #include "originEpoch.h"
 using std::string;
 uint64_t micros() { return 123; }
+uint64_t steadyMicros() { return micros(); }
 template<typename... T> void out(const char *, T...) {}
 struct Stored {
     string value;

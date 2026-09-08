@@ -17,6 +17,7 @@ class TimingMergeTests(unittest.TestCase):
 #include <stddef.h>
 #include "rendezvousTiming.h"
 uint64_t micros() { return 123; }
+uint64_t steadyMicros() { return micros(); }
 struct BeaconAssociation {
     uint64_t originMac, selectedBeacon;
     uint32_t originGeneration, ageCycles;

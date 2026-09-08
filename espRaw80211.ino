@@ -24,6 +24,17 @@
 #define CSIM_ASSERT(condition) assert(condition)
 #endif
 
+// Wi-Fi receive timestamps already use esp_timer_get_time(). Keep every
+// scheduler deadline in that same 64-bit, boot-relative time domain. Arduino's
+// micros() is only 32 bits on ESP32 and wraps after roughly 71m35s.
+static uint64_t steadyMicros() {
+#ifdef CSIM
+    return _micros;
+#else
+    return (uint64_t)esp_timer_get_time();
+#endif
+}
+
 // jimlib.cpp is part of the source-discovery CSIM build and owns helpers that
 // reference the sketch-level JStuff singleton.
 JStuff j;
@@ -157,7 +168,7 @@ public:
         }
     }
 
-    uint64_t absoluteUsec() const { return sim().bootTimeUsec + micros(); }
+    uint64_t absoluteUsec() const { return sim().bootTimeUsec + steadyMicros(); }
 
     void emit(SimBeacon &beacon, uint64_t emissionUsec,
               const Destination &destination) {
@@ -615,7 +626,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                     return false;
                 }
                 association = {originMac, selectedBeacon, originGeneration,
-                               storedAge, micros(), originEpoch};
+                               storedAge, steadyMicros(), originEpoch};
                 associationMergeAccepted++;
                 return true;
             }
@@ -627,7 +638,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             return false;
         }
         associations[empty] = {originMac, selectedBeacon, originGeneration,
-                               storedAge, micros(), originEpoch};
+                               storedAge, steadyMicros(), originEpoch};
         associationMergeAccepted++;
         return true;
     }
@@ -744,7 +755,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                     (unsigned long long)stats.bssid);
         }
         const WifiBeaconCaptureStats capture = beaconCapture.getStats();
-        const uint64_t scanSpan = micros() >= startUsec ? micros() - startUsec : 0;
+        const uint64_t now = steadyMicros();
+        const uint64_t scanSpan = now >= startUsec ? now - startUsec : 0;
         out("matrix capture callback %u mgmt-reject %u short %u nonbeacon %u beacon %u delivered %u parse-reject %u accepted %u target-hits %u scan-span %.3f sec",
             capture.callbackFrames, capture.nonManagementFrames,
             capture.shortFrames, capture.nonBeaconFrames, capture.beaconFrames,
@@ -1035,7 +1047,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
     void onReport(const uint8_t *from, const uint8_t *data, int length) {
-        const uint64_t reportLocalRx = micros();
+        const uint64_t reportLocalRx = steadyMicros();
         reportRxCount++;
         uint64_t sender = 0;
         if (length >= (int)sizeof(BeaconReportHeader)) {
@@ -1056,14 +1068,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 peerSlot = reportSenderCount;
                 reportSenders[peerSlot] = sender;
                 reportSenderRadioFrom[peerSlot] = radioFrom;
-                reportSenderFirstUsec[peerSlot] = micros();
+                reportSenderFirstUsec[peerSlot] = steadyMicros();
                 reportSenderCount++;
             }
             if (peerSlot >= 0) {
                 reportSenderRaw[peerSlot]++;
                 if (radioFrom != 0 && radioFrom != protocolRadioMac(reportSenders[peerSlot]))
                     reportSenderRadioMismatch[peerSlot]++;
-                reportSenderLastUsec[peerSlot] = micros();
+                reportSenderLastUsec[peerSlot] = steadyMicros();
             }
         }
         if (length < (int)sizeof(BeaconReportHeader)) {
@@ -1433,7 +1445,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
     void sleepForExecutor(uint64_t duration) {
-        advanceRoundClock(micros());
+        advanceRoundClock(steadyMicros());
         if (!spiffsIncarnation.read()) return;
         saveClaims(); saveAssociations(); saveOrigins();
         out("deep sleep %.3f sec executor", duration / 1000000.0);
@@ -1442,7 +1454,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
 #endif
         // Account for save/log time before deciding whether sleep is still safe.
-        const uint64_t now = micros();
+        const uint64_t now = steadyMicros();
         duration = executionPlan.sleepUntilNext(now, beaconSamplingWindowUsec + 500000);
         if (duration < 1000000) return;
         spiffsRoundElapsed = roundClock.remainder + (now-roundClock.last) + duration;
@@ -1678,7 +1690,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 #ifdef CSIM
         printf("%012llx ", (unsigned long long)context->mac);
         const double displaySeconds =
-            (sim().bootTimeUsec + micros()) / 1000000.0;
+            (sim().bootTimeUsec + steadyMicros()) / 1000000.0;
 #else
         const double displaySeconds = millis() / 1000.0;
 #endif
@@ -1742,7 +1754,7 @@ public:
         espNowEndUsec = 0;
         beaconReceivedAtUsec = 0;
         loopCount = 0;
-        startUsec = micros();
+        startUsec = steadyMicros();
         nextReportUsec = startUsec;
         deviceMac =
 #ifdef CSIM
@@ -1767,7 +1779,7 @@ public:
         loadAssociations();
         wakeGeneration = spiffsClaimGeneration.read();
         if (!wakeGeneration) wakeGeneration = 1;
-        roundClock = {spiffsRoundElapsed.read(), micros()};
+        roundClock = {spiffsRoundElapsed.read(), steadyMicros()};
         incarnation = spiffsIncarnation.read();
         if (incarnation == 0 || wakeGeneration == 0) {
 #ifdef CSIM
@@ -1789,7 +1801,7 @@ public:
         scoutRendezvousWake = false;
 #ifdef CSIM
         const double setupSeconds =
-            (sim().bootTimeUsec + micros()) / 1000000.0;
+            (sim().bootTimeUsec + steadyMicros()) / 1000000.0;
 #else
         const double setupSeconds = millis() / 1000.0;
 #endif
@@ -1835,7 +1847,7 @@ public:
 #endif
         loopCount++;
         esp_task_wdt_reset();
-        const uint64_t nowUsec = micros();
+        const uint64_t nowUsec = steadyMicros();
         intervalExecutorLoop(nowUsec);
         return;
     }
