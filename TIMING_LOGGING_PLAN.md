@@ -7,6 +7,53 @@ implemented. Baseline/reset-rejoin validation, cross-BSSID clock reconstruction,
 and interval scheduling remain pending. Earlier slice descriptions below are
 historical checkpoints.
 
+Interval planner slice (2026-09-08): `rendezvousPlanner.h` implements a pure,
+allocation-free bounded appointment planner, not yet connected to the firmware
+executor. Required home appointments are added first; failing to fit one marks
+the entire plan invalid. Optional scout additions roll back on capacity/budget
+failure. The cumulative scout budget measures additional awake time relative
+to the home-only plan, including bridged gaps. Sorting/union preserves each
+appointment's bitmask and merges touching, overlapping and configured nearby
+intervals. Sleep hints include an explicit caller-supplied boot/acquisition lead;
+invalid or exhausted plans request replanning, not indefinite sleep.
+
+The clock helper projects the current or next beacon-relative appointment into
+one local monotonic clock. A currently active window is clipped at `now` and
+marked late: partial coverage must never be counted as full qualification.
+Phase denotes exchange start within a period, separate from acquisition/wake
+lead. Overflow and invalid timing parameters fail explicitly; TSF clock startup
+does not create a fictitious negative-time previous appointment. Observations
+must be freshness-qualified by the caller. The helper assumes unit-rate TSF/local
+projection; drift/uncertainty guards remain an executor policy, not hidden here.
+
+Fair selection walks eligible BSSIDs after a persisted cursor and wraps; caller
+records each attempt/defer outcome and advances the cursor so an unreachable
+target cannot starve others. Eligibility (RSSI, channel, freshness), cadence,
+and retry budget remain explicit executor responsibilities.
+
+Validation: 18 host tests pass. Planner tests include 1,000 deterministic
+random schedules with undefined-behavior sanitizer, cumulative budget and
+capacity failure, transitive merging, late windows, TSF/uint64 boundaries,
+multi-hour periods, permutation-independent scout selection, and exact recorded
+clock pairs. `scripts/replay_interval_planner.cpp` replayed 377 valid observations
+from the six running logs: 250 local + 127 Miner6, zero invalid plans. Of these,
+97 first windows were already partially elapsed, correctly marked late. Replay
+uses the experimental 30s period/5s phase/5s exchange and validates two successive
+home windows per observation; it does not claim a multi-beacon hardware test.
+
+Integration still to do, before deployment:
+1. Keep the radio awake across merged appointments while tracking each logical
+   exchange separately; preserve the delayed first ESP-NOW initialization.
+2. Age evidence and advance reset qualification by logical rounds, not boots.
+3. Add explicit per-exchange identity to packets/logs for multiple appointments
+   in one boot, and adapt analysis accordingly.
+4. Persist/update scout cursor, qualify fresh timing observations, replan on home
+   changes, and handle missing timing without silently replacing home visits.
+5. Test simulator execution and then a controlled six-board deployment.
+
+No live scheduling behavior, firmware binary or running boards changed in this
+planner-only slice. MAC normalization remains committed but not deployed.
+
 MAC diagnostics follow-up: hardware protocol origin integers retain the
 ESP.getEfuseMac() byte order for wire/persistence compatibility. The new
 `protocolRadioMac()` conversion compares physical callbacks in network order;
