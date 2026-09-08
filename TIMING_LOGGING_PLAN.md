@@ -7,6 +7,26 @@ implemented. Baseline/reset-rejoin validation, cross-BSSID clock reconstruction,
 and interval scheduling remain pending. Earlier slice descriptions below are
 historical checkpoints.
 
+MAC diagnostics follow-up: hardware protocol origin integers retain the
+ESP.getEfuseMac() byte order for wire/persistence compatibility. The new
+`protocolRadioMac()` conversion compares physical callbacks in network order;
+CSIM already uses network-order context IDs and intentionally uses an identity
+conversion. Summary logs retain `origin` and add canonical `origin-radio`,
+directly comparable with `radio-from`. `radio-mismatch` now counts differing
+addresses after normalization, not the representation reversal. Headerless
+fallback peer identities are converted back to the protocol convention too.
+No membership migration, wire revision, or hardware deployment is part of this
+fix. Both hardware and simulator representations have host regression tests.
+
+Next scheduler implementation slice: a host-tested interval planner separating
+home/scout appointments from physical wake/sleep. Preserve home windows, rotate
+scout candidates, merge overlapping/nearby windows, and sleep only in worthwhile
+gaps. Integrating multiple appointments into the firmware must also move evidence
+aging/reset qualification to logical rounds and add exchange sequence identity.
+Preserve delayed ESP-NOW initialization and measure capture continuity during
+hardware validation. Asymmetric reception is evidence for a radio-state
+investigation, not yet proof of a hardware-specific cause.
+
 ## Review amendments and implementation boundary (2026-09-08)
 
 These amendments supersede conflicting details in the original proposal below.

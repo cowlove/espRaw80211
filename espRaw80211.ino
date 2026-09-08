@@ -4,6 +4,7 @@
 #include "rendezvousTiming.h"
 #include "beaconReport.h"
 #include "originEpoch.h"
+#include "macIdentity.h"
 #ifndef ESP32
 #error Only the ESP32 is supported
 #endif
@@ -900,12 +901,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             memcpy(&peek, data, sizeof(peek));
             sender = peek.senderMac;
         }
-        if (sender == 0 && from != nullptr)
-            for (int i = 0; i < 6; ++i) sender = (sender << 8) | from[i];
         int peerSlot = -1;
         uint64_t radioFrom = 0;
         if (from != nullptr)
             for (int i = 0; i < 6; ++i) radioFrom = (radioFrom << 8) | from[i];
+        if (sender == 0) sender = protocolRadioMac(radioFrom);
         if (sender != 0 && sender != deviceMac) {
             for (uint8_t i = 0; i < reportSenderCount; ++i)
                 if (reportSenders[i] == sender) peerSlot = i;
@@ -919,7 +919,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             }
             if (peerSlot >= 0) {
                 reportSenderRaw[peerSlot]++;
-                if (radioFrom != 0 && radioFrom != reportSenders[peerSlot])
+                if (radioFrom != 0 && radioFrom != protocolRadioMac(reportSenders[peerSlot]))
                     reportSenderRadioMismatch[peerSlot]++;
                 reportSenderLastUsec[peerSlot] = micros();
             }
@@ -961,8 +961,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         reportRxClaimCount += count;
         if (peerSlot >= 0) reportSenderClaimEntries[peerSlot] += count;
         sender = header.senderMac;
-        if (sender == 0 && from != nullptr)
-            for (int i = 0; i < 6; ++i) sender = (sender << 8) | from[i];
+        if (sender == 0) sender = protocolRadioMac(radioFrom);
         if (sender == deviceMac) return;
         reportValidRxCount++;
         if (peerSlot >= 0) reportSenderValid[peerSlot]++;
@@ -1056,7 +1055,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 (unsigned long long)reportSenderFirstUsec[i],
                 (unsigned long long)reportSenderLastUsec[i]);
         for (uint8_t i = 0; i < reportSenderCount; ++i)
-            out("espnow summary origin %012llx radio-from %012llx frames %u valid %u short %u bad-version %u association-refresh %u claim-entries %u radio-mismatch %u first %llu last %llu",
+            out("espnow summary origin %012llx radio-from %012llx frames %u valid %u short %u bad-version %u association-refresh %u claim-entries %u radio-mismatch %u first %llu last %llu origin-radio %012llx",
                 (unsigned long long)reportSenders[i],
                 (unsigned long long)reportSenderRadioFrom[i],
                 reportSenderRaw[i], reportSenderValid[i],
@@ -1064,7 +1063,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 reportSenderAssociationRefresh[i], reportSenderClaimEntries[i],
                 reportSenderRadioMismatch[i],
                 (unsigned long long)reportSenderFirstUsec[i],
-                (unsigned long long)reportSenderLastUsec[i]);
+                (unsigned long long)reportSenderLastUsec[i],
+                (unsigned long long)protocolRadioMac(reportSenders[i]));
         for (const BeaconClaim &claim : claims) {
             if (claim.originMac == 0 || claim.originMac == deviceMac) continue;
             bool duplicate = false;
