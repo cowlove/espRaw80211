@@ -7,8 +7,11 @@ import argparse
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+import json
+import shlex
+from dataclasses import dataclass, field
 from pathlib import Path
+import rendezvous_evidence as evidence
 
 STAMP = re.compile(r"^(\d+\.\d+)")
 START = "ESP-NOW exchange phase started"
@@ -26,6 +29,7 @@ class Cycle:
     healthy: bool = False
     consensus: str = "-"
     reset: str = ""
+    capture: int = field(default=0, compare=False)
 
     @property
     def seconds(self) -> float:
@@ -40,6 +44,7 @@ def parse(data: bytes, limit: int) -> list[Cycle]:
     cycles: list[Cycle] = []
     current: Cycle | None = None
     session_start = 0
+    capture = 0
     for line in clean(data):
         # Logger sessions delimit capture continuity, not device resets.
         # Never let a partial cycle or its trailing counters span sessions.
@@ -48,6 +53,7 @@ def parse(data: bytes, limit: int) -> list[Cycle]:
         if line.startswith('logger-session '):
             current = None
             session_start = len(cycles)
+            capture += 1
             continue
         m = STAMP.match(line)
         if not m:
@@ -56,7 +62,7 @@ def parse(data: bytes, limit: int) -> list[Cycle]:
         if START in line:
             if current is not None:
                 current = None
-            current = Cycle(t, t)
+            current = Cycle(t, t, capture=capture)
         elif current is not None and END in line:
             current.end = t
             if current.end >= current.start:
@@ -83,11 +89,13 @@ def parse(data: bytes, limit: int) -> list[Cycle]:
 
 def read_remote(host: str, path: str, tail_bytes: int) -> bytes:
     # tail avoids transferring multi-day serial logs while preserving recent cycles.
-    cmd = ["ssh", host, "tail", "-c", str(tail_bytes), "--", path]
+    quoted = ('"$HOME"/' + shlex.quote(path[2:])) if path.startswith('~/') else shlex.quote(path)
+    cmd = ["ssh", "-x", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+           host, f"tail -c {tail_bytes} -- {quoted}"]
     try:
-        return subprocess.run(cmd, check=True, capture_output=True).stdout
-    except subprocess.CalledProcessError as exc:
-        print(f"remote read failed ({host}:{path}): {exc.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+        return subprocess.run(cmd, check=True, capture_output=True, timeout=30).stdout
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        print(f"remote read failed ({host}:{path}): {(exc.stderr or b'').decode(errors='replace').strip()}", file=sys.stderr)
         return b""
 
 
@@ -128,7 +136,11 @@ def convergence_dashboard(name: str, data: bytes) -> tuple[list[int], list[float
     started = False
     count = 0
     elapsed = 0.0
+    capture = None
     for c in cycles:
+        if c.capture != capture:
+            started, count, elapsed = False, 0, 0.0
+            capture = c.capture
         if c.reset == "EXECUTED":
             started, count, elapsed = True, 0, 0.0
             continue
@@ -153,6 +165,8 @@ def convergence_dashboard(name: str, data: bytes) -> tuple[list[int], list[float
 def current_dashboard(name: str, data: bytes) -> None:
     """Show the currently active reset-to-consensus attempt, if any."""
     cycles = parse(data, 10_000)
+    if cycles:
+        cycles = [c for c in cycles if c.capture == cycles[-1].capture]
     resets = [i for i, c in enumerate(cycles) if c.reset == "EXECUTED"]
     if not resets:
         print(f"{name:<12} current=none")
@@ -193,15 +207,73 @@ def main() -> int:
     ap.add_argument("--remote-dir", default="~/src/espRaw80211")
     ap.add_argument("--tail-bytes", type=int, default=8_000_000)
     ap.add_argument("--convergence", action="store_true", help="show cycles from reset execution to next 10/10 consensus")
+    ap.add_argument("--session", default="latest", help="latest (default), all, or an exact logger session ID")
+    ap.add_argument("--since", help="inclusive ISO host timestamp with timezone")
+    ap.add_argument("--until", help="inclusive ISO host timestamp with timezone")
+    ap.add_argument("--evidence", action="store_true", help="summarize reception, merges and incarnations")
+    ap.add_argument("--overlaps", action="store_true", help="compare same-BSSID planned exchange windows")
+    ap.add_argument("--json", action="store_true", help="machine-readable evidence and optional overlaps")
+    ap.add_argument("--local-only", action="store_true", help="do not read Miner6")
     args = ap.parse_args()
+    if args.recent < 0 or args.tail_bytes <= 0:
+        ap.error('--recent must be nonnegative and --tail-bytes positive')
+    try:
+        since = evidence.timestamp(args.since) if args.since else None
+        until = evidence.timestamp(args.until) if args.until else None
+    except ValueError as exc:
+        ap.error(str(exc))
+    if since is not None and until is not None and since > until:
+        ap.error('--since must not be later than --until')
+    datasets, raw, warnings = [], [], {}
+    for i in range(4):
+        path = args.log_dir / f"cat.usb{i}.out"
+        data = b''
+        if path.exists():
+            with path.open('rb') as stream:
+                stream.seek(max(0, path.stat().st_size - args.tail_bytes))
+                data = stream.read()
+        raw.append((f'local usb{i}', data))
+    if not args.local_only:
+        for i in range(2):
+            raw.append((f'miner6 usb{i}', read_remote(args.remote_host,
+                       f'{args.remote_dir}/cat.usb{i}.out', args.tail_bytes)))
+    for name, data in raw:
+        selected, notes = evidence.select(data, args.session, since, until)
+        if len(data) >= args.tail_bytes:
+            notes.append('input byte limit reached; older history may be missing')
+        warnings[name] = notes
+        datasets.append((name, selected))
+        for note in notes:
+            print(f'{name}: {note}', file=sys.stderr)
+    if args.evidence or args.overlaps or args.json:
+        summaries = {name: evidence.summarize(data) for name, data in datasets}
+        pairs = evidence.overlaps(datasets) if args.overlaps else []
+        caveats = ['Overlap is same-BSSID planned-window evidence, not proof of radio delivery.',
+                   'Host clocks must be approximately aligned; 15-second host-time gate applied.',
+                   'Epoch rejection totals include normal self-origin relay rejection.',
+                   'Absence of a sampled packet is not proof that no packet arrived.']
+        if args.json:
+            print(json.dumps({'boards': summaries, 'overlaps': pairs,
+                              'warnings': warnings, 'caveats': caveats}, indent=2))
+        else:
+            for name, summary in summaries.items():
+                latest = summary['latest'] or {}
+                print(f"{name:<12} cycles={summary['complete_cycles']} partial={summary['partial_cycles']} "
+                      f"zero-rx={summary['zero_rawrx_cycles']} valid={summary['valid_reports']} "
+                      f"bad-length={summary['bad_length']} incarnation-changes={summary['observed_incarnation_changes']}")
+                print(f"  latest: wake={latest.get('wake')} home={latest.get('home')} "
+                      f"listeners={latest.get('listeners')} health={latest.get('health')} "
+                      f"rawrx={latest.get('rawrx')} session={latest.get('session')}")
+                print(f"  merges={summary['merge']} epoch-rejections(includes-self)={summary['epoch_rejections_including_self']}")
+            if args.overlaps:
+                print(f'Same-BSSID planned overlaps: {len(pairs)} (showing latest 20)')
+                for pair in pairs[-20:]:
+                    print(json.dumps(pair, sort_keys=True))
+            for note in caveats:
+                print('Note: ' + note)
+        return 0
     if args.convergence:
         print("Convergence dashboard | KPI = complete wake/sleep cycles after flush until 10/10 consensus")
-        datasets = []
-        for i in range(4):
-            path = args.log_dir / f"cat.usb{i}.out"
-            datasets.append((f"local usb{i}", path.read_bytes() if path.exists() else b""))
-        for i in range(2):
-            datasets.append((f"miner6 usb{i}", read_remote(args.remote_host, f"{args.remote_dir}/cat.usb{i}.out", args.tail_bytes)))
         all_cycles = []
         for name, data in datasets:
             all_cycles.extend(convergence_dashboard(name, data)[0])
@@ -212,15 +284,11 @@ def main() -> int:
             current_dashboard(name, data)
         print("Observed rendezvous | independent of TEST RESET decisions")
         observed = [rendezvous_dashboard(name, data) for name, data in datasets]
-        print(f"GLOBAL        {'ALL SIX QUALIFIED' if all(observed) else 'not all six currently qualified'}")
+        print(f"LATEST RECORDS {'all qualified (not necessarily simultaneous)' if all(observed) else 'not all qualified'}")
     else:
         print(f"Rendezvous dashboard | last {args.recent} complete cycles | KPI = exchange-start → deep-sleep")
-        for i in range(4):
-            path = args.log_dir / f"cat.usb{i}.out"
-            dashboard(f"local usb{i}", path.read_bytes() if path.exists() else b"", args.recent)
-        for i in range(2):
-            path = f"{args.remote_dir}/cat.usb{i}.out"
-            dashboard(f"miner6 usb{i}", read_remote(args.remote_host, path, args.tail_bytes), args.recent)
+        for name, data in datasets:
+            dashboard(name, data, args.recent)
     return 0
 
 

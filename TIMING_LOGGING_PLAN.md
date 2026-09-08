@@ -1,9 +1,11 @@
 # Rendezvous Timing and Logging Implementation Plan
 
 Status: host infrastructure, TSF/merge diagnostics, sender timing, and
-incarnation-aware membership are implemented through wire version 6. Not yet
-deployed; hardware validation, offline correlation, and interval scheduling
-remain pending. Earlier slice descriptions below are historical checkpoints.
+incarnation-aware membership are implemented through wire version 6, deployed
+to all six boards on 2026-09-08. Session-aware offline same-BSSID correlation is
+implemented. Baseline/reset-rejoin validation, cross-BSSID clock reconstruction,
+and interval scheduling remain pending. Earlier slice descriptions below are
+historical checkpoints.
 
 ## Review amendments and implementation boundary (2026-09-08)
 
@@ -140,6 +142,41 @@ ESP32 build passes (RAM 90,988; flash 1,146,418 bytes). No boards deployed.
 Next hardware gate: upgrade all six together, verify report reception and timing,
 then reset one board and confirm old relays do not prevent rejoin. Analyzer
 correlation and interval scheduling remain later work.
+
+Fifth slice: offline analyzer supports `--session latest` (default), `all`, or
+an exact session ID, plus timezone-qualified inclusive `--since` / `--until`.
+Both hosts use bounded tail reads (`--tail-bytes`); missing session beginnings,
+legacy untimestamped selection, empty inputs and bounded history are reported.
+`--evidence` reports complete/partial exchanges, reception, merge/rejection
+counters, local incarnation changes, origin replacements, and latest state.
+`--json` includes explicit raw-vs-byte-reversed MAC comparisons, avoiding the
+mistake of treating the firmware's byte-order mismatch counter as relay proof.
+`--overlaps` correlates only version-5-or-newer, complete same-BSSID scheduled
+TSF windows, with a 15-second host-time proximity gate against reused clock
+eras. Cross-BSSID clock reconstruction is still deferred. A positive overlap
+does not prove actual radio activity; unmatched sampled packets remain unknown
+unless the receiver has zero raw callbacks. Host clock alignment is assumed,
+not measured by this tool. Compact low-ms packet timestamps are retained as
+samples, not unwrapped into a fabricated common global clock.
+
+Logger boundaries also stop the legacy convergence counter from stitching
+separate captures together. The latest qualification display no longer claims
+simultaneous six-board convergence from six independently latest records.
+
+Example baseline review (read-only; no logger or board changes):
+
+```sh
+python3 scripts/analyze_rendezvous.py --evidence --overlaps
+python3 scripts/analyze_rendezvous.py --session latest --since 2026-09-08T10:42:40-07:00 --json --overlaps
+python3 scripts/analyze_rendezvous.py --recent 0
+```
+
+Validation: 15 host tests including session boundaries, truncated captures,
+time filters, partial exchanges, TSF half-open intervals, different BSSIDs,
+host-time separation, version gating, packet identity, binary log noise, and
+cross-session convergence. Read-only six-board smoke test succeeded; no firmware
+build/deployment is required for this analyzer-only slice. Full baseline review
+remains separate from this early smoke test.
 
 This document records the agreed direction for the next implementation pass.
 The six deployed boards are controlled as one ecosystem: a firmware packet
