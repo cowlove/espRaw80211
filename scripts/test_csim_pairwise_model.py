@@ -16,6 +16,10 @@ int main() {
     assert(boardCount == 7);
     assert(index(firstMac) == 0 && index(firstMac + 6) == 6);
     assert(index(firstMac + 7) == -1);
+    assert(receptionScale == 0.60f);
+    assert(scaledSuccess(1.0f) > 0.59f && scaledSuccess(1.0f) < 0.61f);
+    assert(scaledSuccess(0.0f) == 0.0f);
+    assert(scaledSuccess(0.5f) > 0.29f && scaledSuccess(0.5f) < 0.31f);
 
     // Inactive receivers and measured-zero links always drop.
     assert(drop(firstMac + 1, firstMac));
@@ -29,7 +33,7 @@ int main() {
         beginWindow(firstMac, window);
         delivered += !drop(firstMac + 1, firstMac);
     }
-    assert(delivered > 800 && delivered < 950);
+    assert(delivered > 250 && delivered < 400);
 
     // The 67%-healthy directed link must produce complete dead windows.
     bool foundDeadWindow = false;

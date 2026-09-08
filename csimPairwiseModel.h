@@ -13,6 +13,9 @@ namespace CsimPairwiseModel {
 static constexpr size_t boardCount = CsimPairwiseData::boardCount;
 static constexpr uint64_t firstMac = 0xddeeff000001ULL;
 static constexpr float nominalPacketsPerSecond = 5.0f;
+// Apply one deliberately conservative scale to both empirical success gates.
+// This stands in for dependencies missing from the first measured model.
+static constexpr float receptionScale = 0.60f;
 static constexpr uint64_t seed = 0x6d5a56e9d31b4a27ULL;
 
 struct ReceiverState {
@@ -43,6 +46,12 @@ inline uint32_t sample(uint8_t receiver, uint8_t sender, uint32_t window,
     return static_cast<uint32_t>(mix(key) % scale);
 }
 
+inline float scaledSuccess(float success) {
+    if (success <= 0) return 0;
+    if (success >= 1) return receptionScale;
+    return success * receptionScale;
+}
+
 inline void beginWindow(uint64_t receiverMac, uint32_t window) {
     const int receiver = index(receiverMac);
     if (receiver < 0) return;
@@ -65,12 +74,14 @@ inline bool drop(uint64_t senderMac, uint64_t receiverMac) {
     // One receiver-specific draw gates the complete overlap window. A second
     // draw applies the measured unconditional packet rate, intentionally
     // making this first model slightly harsher than the hardware observations.
+    const float windowSuccess = scaledSuccess(
+        CsimPairwiseData::healthyWindowPercent[receiver][sender] / 100.0f);
     if (sample(receiver, sender, state.window, 0, 1000000) >=
-            static_cast<uint32_t>(
-                CsimPairwiseData::healthyWindowPercent[receiver][sender] * 10000.0f))
+            static_cast<uint32_t>(windowSuccess * 1000000.0f))
         return true;
-    const float probability = CsimPairwiseData::packetsPerSecond[receiver][sender] /
-        nominalPacketsPerSecond;
+    const float probability = scaledSuccess(
+        CsimPairwiseData::packetsPerSecond[receiver][sender] /
+        nominalPacketsPerSecond);
     if (probability <= 0) return true;
     if (probability >= 1) return false;
     const uint32_t packet = ++state.packet[sender];
