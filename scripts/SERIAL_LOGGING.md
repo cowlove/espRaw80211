@@ -1,5 +1,21 @@
 # Reconnecting screen loggers
 
+## Artificial test swarm size versus USB count
+
+`testSwarmConfig.h` is the single source for `ARTIFICIAL_TEST_SWARM_BOARD_COUNT`
+(currently 7). Firmware's test reset qualification and the offline analyzer use
+it. Count every participating board, including boards without USB/logging.
+For example, nine participating boards with only five USB loggers means set 9,
+not 5. USB discovery, flashing targets, and simulator context count remain
+independent. Logs from a subset provide only that subset's local observations.
+
+This is artificial external knowledge used ONLY for controlled tests. Real-world
+swarms have no known global count; scheduling/discovery/membership acceptance
+must not depend on it. Rebuild/redeploy after changing the header. The firmware
+clears only test qualification/reset progress when this value changes, preserving
+membership. Historical analyzer qualification uses the current header value;
+firmware logs its compiled test count for experiment provenance.
+
 Run `python3 scripts/deploy_usb_screens.py --log-only` to restart logging for
 all detected USB boards without building, flashing, or erasing. Use
 `--boards 0,1,2,3,4` to select the five local ports explicitly. Normal deployment

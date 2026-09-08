@@ -12,6 +12,7 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 import rendezvous_evidence as evidence
+from test_swarm_config import swarm_board_count
 
 STAMP = re.compile(r"^(\d+\.\d+)")
 START = "ESP-NOW exchange phase started"
@@ -190,16 +191,17 @@ def current_dashboard(name: str, data: bytes) -> None:
 
 
 def rendezvous_dashboard(name: str, data: bytes) -> bool:
-    """Measure observed rendezvous evidence independently of reset decisions."""
+    """Apply an ARTIFICIAL test oracle, not a discoverable global membership."""
+    required = swarm_board_count()
     cycles = parse(data, 10_000)
     qualified = [c for c in cycles if c.healthy and c.home != "-" and
-                 c.listeners.isdigit() and int(c.listeners) >= 6]
+                 c.listeners.isdigit() and int(c.listeners) >= required]
     if not cycles:
         print(f"{name:<12} rendezvous=none")
         return False
     latest = cycles[-1]
     state = "QUALIFIED" if qualified and qualified[-1] is latest else "not-qualified"
-    print(f"{name:<12} rendezvous={state:<12} qualified={len(qualified):3d}  latest-home={latest.home}  latest-listeners={latest.listeners}  latest-exchange={'healthy' if latest.healthy else 'incomplete'}")
+    print(f"{name:<12} rendezvous={state:<12} artificial-test-board-count={required} qualified={len(qualified):3d}  latest-home={latest.home}  latest-listeners={latest.listeners}  latest-exchange={'healthy' if latest.healthy else 'incomplete'}")
     return state == "QUALIFIED"
 
 

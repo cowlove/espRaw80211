@@ -7,6 +7,7 @@
 #include "macIdentity.h"
 #include "rendezvousPlanner.h"
 #include "rendezvousExecutor.h"
+#include "testSwarmConfig.h"
 #ifndef ESP32
 #error Only the ESP32 is supported
 #endif
@@ -227,11 +228,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     // Long-run test setting: retain association evidence across this many
     // rendezvous periods. Association records are aged by wake, not wall time.
     static constexpr uint32_t associationFreshnessCycles = 6;
-    // Temporary long-run bootstrap test hook. Each device independently
-    // commits to a reset after ten consecutive healthy cycles in which six
-    // fresh associations select its home beacon. It then waits three more
-    // completed wake cycles before resetting, even if consensus is lost.
-    static constexpr size_t testClusterSize = 6;
+    // ARTIFICIAL test oracle, not knowledge available to a real deployment.
+    // Counts unlogged boards too; never derive this from USB connections.
+    // Reset after ten qualified logical rounds, then a three-round delay.
+    static constexpr size_t testClusterSize = ARTIFICIAL_TEST_SWARM_BOARD_COUNT;
+    SPIFFSVariable<uint32_t> spiffsTestSwarmCount{"/testSwarmCount", 0};
     static constexpr int testConsensusCyclesToCommit = 10;
     static constexpr int testResetDelayCycles = 3;
     static constexpr int testConsensusMissesToReset = 3;
@@ -1624,6 +1625,17 @@ public:
             ESP.getEfuseMac();
 #endif
         SPIFFSVariableESP32Base::begin();
+        if (spiffsTestSwarmCount.read() != testClusterSize) {
+            // Do not inherit a streak/committed reset from a different oracle.
+            spiffsTestConsensusCycles = 0;
+            spiffsTestConsensusMisses = 0;
+            spiffsTestResetCommitted = 0;
+            spiffsTestResetDelayCycles = 0;
+            spiffsRoundHealthy = 0;
+            spiffsTestSwarmCount = testClusterSize;
+        }
+        out("artificial-test-swarm boards %u (includes unlogged boards; not production knowledge)",
+            (unsigned)testClusterSize);
         loadOrigins();
         loadClaims();
         loadAssociations();
