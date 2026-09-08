@@ -292,6 +292,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint16_t reportRxClaimCount = 0;
     uint16_t reportValidRxCount = 0;
     uint64_t reportSenders[16] = {};
+    uint64_t reportSenderRadioFrom[16] = {};
     uint16_t reportSenderRaw[16] = {};
     uint16_t reportSenderValid[16] = {};
     uint64_t reportSenderFirstUsec[16] = {};
@@ -300,6 +301,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint16_t reportSenderBadVersion[16] = {};
     uint16_t reportSenderAssociationRefresh[16] = {};
     uint16_t reportSenderClaimEntries[16] = {};
+    uint16_t reportSenderRadioMismatch[16] = {};
     uint8_t reportSenderCount = 0;
     uint32_t scanParseRejects = 0;
     uint32_t scanAccepted = 0;
@@ -830,6 +832,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         if (sender == 0 && from != nullptr)
             for (int i = 0; i < 6; ++i) sender = (sender << 8) | from[i];
         int peerSlot = -1;
+        uint64_t radioFrom = 0;
+        if (from != nullptr)
+            for (int i = 0; i < 6; ++i) radioFrom = (radioFrom << 8) | from[i];
         if (sender != 0 && sender != deviceMac) {
             for (uint8_t i = 0; i < reportSenderCount; ++i)
                 if (reportSenders[i] == sender) peerSlot = i;
@@ -837,11 +842,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 sizeof(reportSenders) / sizeof(reportSenders[0])) {
                 peerSlot = reportSenderCount;
                 reportSenders[peerSlot] = sender;
+                reportSenderRadioFrom[peerSlot] = radioFrom;
                 reportSenderFirstUsec[peerSlot] = micros();
                 reportSenderCount++;
             }
             if (peerSlot >= 0) {
                 reportSenderRaw[peerSlot]++;
+                if (radioFrom != 0 && radioFrom != reportSenders[peerSlot])
+                    reportSenderRadioMismatch[peerSlot]++;
                 reportSenderLastUsec[peerSlot] = micros();
             }
         }
@@ -950,11 +958,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 (unsigned long long)reportSenderFirstUsec[i],
                 (unsigned long long)reportSenderLastUsec[i]);
         for (uint8_t i = 0; i < reportSenderCount; ++i)
-            out("espnow summary source %012llx frames %u valid %u short %u bad-version %u association-refresh %u claim-entries %u first %llu last %llu",
+            out("espnow summary origin %012llx radio-from %012llx frames %u valid %u short %u bad-version %u association-refresh %u claim-entries %u radio-mismatch %u first %llu last %llu",
                 (unsigned long long)reportSenders[i],
+                (unsigned long long)reportSenderRadioFrom[i],
                 reportSenderRaw[i], reportSenderValid[i],
                 reportSenderShort[i], reportSenderBadVersion[i],
                 reportSenderAssociationRefresh[i], reportSenderClaimEntries[i],
+                reportSenderRadioMismatch[i],
                 (unsigned long long)reportSenderFirstUsec[i],
                 (unsigned long long)reportSenderLastUsec[i]);
         for (const BeaconClaim &claim : claims) {
@@ -1174,6 +1184,7 @@ public:
         reportRxClaimCount = 0;
         reportValidRxCount = 0;
         memset(reportSenders, 0, sizeof(reportSenders));
+        memset(reportSenderRadioFrom, 0, sizeof(reportSenderRadioFrom));
         memset(reportSenderRaw, 0, sizeof(reportSenderRaw));
         memset(reportSenderValid, 0, sizeof(reportSenderValid));
         memset(reportSenderFirstUsec, 0, sizeof(reportSenderFirstUsec));
@@ -1183,6 +1194,7 @@ public:
         memset(reportSenderAssociationRefresh, 0,
                sizeof(reportSenderAssociationRefresh));
         memset(reportSenderClaimEntries, 0, sizeof(reportSenderClaimEntries));
+        memset(reportSenderRadioMismatch, 0, sizeof(reportSenderRadioMismatch));
         reportSenderCount = 0;
         scanParseRejects = 0;
         scanAccepted = 0;
