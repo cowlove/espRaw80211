@@ -21,6 +21,24 @@ becomes a decoded view rather than the storage format.
 - The analyzer consumes typed records directly. A decoder can reconstruct an
   equivalent readable transcript for debugging and historical comparison.
 
+## Human-readable CSIM output
+
+The structured evidence stream and the interactive CSIM console are separate
+outputs. CSIM retains a concise human-readable view without duplicating the
+full diagnostic transcript:
+
+- print run configuration and random seed at startup;
+- print topology, migration, convergence, reset, recovery, and error changes
+  immediately;
+- print one global status line at a configurable simulated-time interval;
+- print a final convergence and transport summary when the run ends.
+
+Expose the cadence as an option such as `--summary-period 2`; `0` disables
+periodic summaries for batch runs. A summary should describe all boards in one
+compact line (home-group distribution, qualification state, migrations, and
+healthy-window totals), rather than printing one verbose dump per board. Full
+evidence continues to go to the structured sink and can be decoded afterward.
+
 Fixed event IDs and explicitly typed fields are preferred over verbose JSON or
 self-describing CBOR for the production stream. The schema and decoder provide
 self-description outside the constrained wire/storage path.
