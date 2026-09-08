@@ -10,6 +10,7 @@ import sys
 import json
 import shlex
 import time
+from collections import defaultdict
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -249,6 +250,41 @@ def global_home_convergences(datasets, required: int, max_skew: float = 90):
     return events
 
 
+def current_home_distribution(datasets):
+    """Group each logged board's latest observed home by BSSID.
+
+    This is an observational snapshot of boards with serial logs, not global
+    swarm membership. Boards without a usable latest home are returned
+    separately instead of being counted as a beacon group.
+    """
+    groups = defaultdict(list)
+    unknown = []
+    for name, data in datasets:
+        latest = evidence.summarize(data)['latest'] or {}
+        home = latest.get('home')
+        if home and home != '-':
+            groups[home].append(name)
+        else:
+            unknown.append(name)
+    rows = [
+        {'bssid': bssid, 'devices': len(names), 'boards': sorted(names)}
+        for bssid, names in groups.items()
+    ]
+    rows.sort(key=lambda row: (-row['devices'], row['bssid']))
+    return rows, sorted(unknown)
+
+
+def print_current_home_distribution(datasets) -> None:
+    rows, unknown = current_home_distribution(datasets)
+    print('Current home distribution | latest observation per logged board')
+    if not rows:
+        print('  no current home observations')
+    for row in rows:
+        print(f"  {row['bssid']}  devices={row['devices']}  boards={','.join(row['boards'])}")
+    if unknown:
+        print(f"  unknown-home devices={len(unknown)}  boards={','.join(unknown)}")
+
+
 def rendezvous_dashboard(name: str, data: bytes) -> bool:
     """Apply an ARTIFICIAL test oracle, not a discoverable global membership."""
     required = swarm_board_count()
@@ -313,15 +349,20 @@ def main() -> int:
             print(f'{name}: {note}', file=sys.stderr)
     if args.evidence or args.overlaps or args.json:
         summaries = {name: evidence.summarize(data) for name, data in datasets}
+        home_distribution, unknown_homes = current_home_distribution(datasets)
         pairs = evidence.overlaps(datasets) if args.overlaps else []
         caveats = ['Overlap is same-BSSID planned-window evidence, not proof of radio delivery.',
                    'Host clocks must be approximately aligned; 15-second host-time gate applied.',
                    'Epoch rejection totals include normal self-origin relay rejection.',
                    'Absence of a sampled packet is not proof that no packet arrived.']
         if args.json:
-            print(json.dumps({'boards': summaries, 'overlaps': pairs,
+            print(json.dumps({'boards': summaries,
+                              'current_home_distribution': home_distribution,
+                              'unknown_home_boards': unknown_homes,
+                              'overlaps': pairs,
                               'warnings': warnings, 'caveats': caveats}, indent=2))
         else:
+            print_current_home_distribution(datasets)
             for name, summary in summaries.items():
                 latest = summary['latest'] or {}
                 print(f"{name:<12} cycles={summary['complete_cycles']} partial={summary['partial_cycles']} "
@@ -339,6 +380,7 @@ def main() -> int:
                 print('Note: ' + note)
         return 0
     if args.convergence:
+        print_current_home_distribution(datasets)
         print("Convergence dashboard | KPI = complete wake/sleep cycles after flush until 10/10 consensus")
         all_cycles = []
         for name, data in datasets:
@@ -359,6 +401,7 @@ def main() -> int:
             print(f"  {stamp}  age={human_age(time.time()-event['host_time'])}  home={event['bssid']}")
         print(f"LATEST RECORDS {'all qualified (not necessarily simultaneous)' if all(observed) else 'not all qualified'}")
     else:
+        print_current_home_distribution(datasets)
         print(f"Rendezvous dashboard | last {args.recent} complete cycles | KPI = exchange-start → deep-sleep")
         for name, data in datasets:
             dashboard(name, data, args.recent)

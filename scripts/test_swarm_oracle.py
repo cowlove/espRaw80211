@@ -45,3 +45,22 @@ class SwarmOracleTests(unittest.TestCase):
         events = analyzer.global_home_convergences(datasets, 2)
         self.assertEqual([event['bssid'] for event in events], ['aaa', 'bbb'])
         self.assertEqual(analyzer.human_age(3661), '1h1m')
+
+    def test_current_home_distribution_is_popularity_sorted(self):
+        def data(home):
+            return (f'2026-09-08T12:00:00-07:00 host_mono_ns=1 board=x port=/dev/x session=s | '
+                    f'00000.1 report-identity incarnation aa wake 1 wire-version 7 exchange 1\n'
+                    f'2026-09-08T12:00:00-07:00 host_mono_ns=2 board=x port=/dev/x session=s | '
+                    f'00005.0 ESP-NOW exchange phase started\n'
+                    f'2026-09-08T12:00:01-07:00 host_mono_ns=3 board=x port=/dev/x session=s | '
+                    f'00010.0 gossip home exchange healthy home {home} listeners 1 rawrx 1 rx 1 valid 1\n'
+                    f'2026-09-08T12:00:02-07:00 host_mono_ns=4 board=x port=/dev/x session=s | '
+                    f'00010.1 exchange complete interval 1\n').encode()
+        datasets = [('c', data('bbb')), ('a', data('aaa')), ('b', data('aaa')),
+                    ('missing', b'no complete observation\n')]
+        rows, unknown = analyzer.current_home_distribution(datasets)
+        self.assertEqual(rows, [
+            {'bssid': 'aaa', 'devices': 2, 'boards': ['a', 'b']},
+            {'bssid': 'bbb', 'devices': 1, 'boards': ['c']},
+        ])
+        self.assertEqual(unknown, ['missing'])
