@@ -39,6 +39,24 @@ liveness is reported separately from actual serial reception. Session/time
 selection, port-owner checks, logger readiness handshake, TSF projection repair,
 truthful firmware counters, and interval scheduling remain follow-up work.
 
+Second implementation slice (2026-09-08): TSF projection now uses the paired
+full TSF/boot-relative receive timestamp without modifying the observation.
+Offsets before reception are subtracted with checked underflow/overflow;
+invalid/missing observations do not emit a comparable exchange interval.
+The observation log distinguishes scheduled exchange end from loop completion.
+Intervals are half-open. Association merges return success, so per-peer
+`association-refresh` counts only accepted direct-header updates. The new
+`association-merge` summary counts all merge calls (including local publication
+and relayed entries), with accepted totals and rejection reasons: invalid key,
+older generation, not fresher, and table full. Counters reset each wake.
+Relayed age increment saturates instead of wrapping at UINT32_MAX.
+Generation/reset semantics and acceptance policy otherwise remain unchanged;
+reset-safe incarnations are still pending. No packet layout, scheduler,
+ESP-NOW initialization order, or board deployment changes in this slice.
+Validation: all five host tests pass (including compiled production merge code
+and TSF projection edge cases); ESP32 build passes. Live diagnostic validation
+remains for the next coordinated deployment.
+
 This document records the agreed direction for the next implementation pass.
 The six deployed boards are controlled as one ecosystem: a firmware packet
 layout revision is deployed to all six boards together. Backward compatibility

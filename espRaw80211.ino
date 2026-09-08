@@ -1,6 +1,7 @@
 #include "jimlib.h"
 #include "espNowMux.h"
 #include "raw80211Capture.h"
+#include "rendezvousTiming.h"
 #ifndef ESP32
 #error Only the ESP32 is supported
 #endif
@@ -300,6 +301,12 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint16_t reportSenderShort[16] = {};
     uint16_t reportSenderBadVersion[16] = {};
     uint16_t reportSenderAssociationRefresh[16] = {};
+    uint32_t associationMergeAttempts = 0;
+    uint32_t associationMergeAccepted = 0;
+    uint32_t associationMergeInvalid = 0;
+    uint32_t associationMergeOlder = 0;
+    uint32_t associationMergeNotFresher = 0;
+    uint32_t associationMergeFull = 0;
     uint16_t reportSenderClaimEntries[16] = {};
     uint16_t reportSenderRadioMismatch[16] = {};
     uint8_t reportSenderCount = 0;
@@ -474,29 +481,46 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         spiffsAssociations = encoded;
     }
 
-    void mergeAssociation(uint64_t originMac, uint64_t selectedBeacon,
+    bool mergeAssociation(uint64_t originMac, uint64_t selectedBeacon,
                           uint32_t originGeneration, uint32_t ageCycles,
                           bool direct = false) {
-        if (originMac == 0 || selectedBeacon == 0) return;
+        associationMergeAttempts++;
+        if (originMac == 0 || selectedBeacon == 0) {
+            associationMergeInvalid++;
+            return false;
+        }
+        const uint32_t storedAge = direct ? 0U :
+            (ageCycles == UINT32_MAX ? UINT32_MAX : ageCycles + 1U);
         size_t empty = associationTableSize;
         for (size_t i = 0; i < associationTableSize; ++i) {
             BeaconAssociation &association = associations[i];
             if (association.originMac == originMac) {
-                if (originGeneration < association.originGeneration) return;
+                if (originGeneration < association.originGeneration) {
+                    associationMergeOlder++;
+                    return false;
+                }
                 const uint32_t currentAge = associationAgeCycles(association);
                 if (originGeneration == association.originGeneration &&
-                    !direct && ageCycles >= currentAge)
-                    return;
+                    !direct && ageCycles >= currentAge) {
+                    associationMergeNotFresher++;
+                    return false;
+                }
                 association = {originMac, selectedBeacon, originGeneration,
-                               direct ? 0U : min(ageCycles + 1U, UINT32_MAX), micros()};
-                return;
+                               storedAge, micros()};
+                associationMergeAccepted++;
+                return true;
             }
             if (empty == associationTableSize && association.originMac == 0)
                 empty = i;
         }
-        if (empty == associationTableSize) return;
+        if (empty == associationTableSize) {
+            associationMergeFull++;
+            return false;
+        }
         associations[empty] = {originMac, selectedBeacon, originGeneration,
-                               direct ? 0U : min(ageCycles + 1U, UINT32_MAX), micros()};
+                               storedAge, micros()};
+        associationMergeAccepted++;
+        return true;
     }
 
     size_t listenerCount(uint64_t bssid) const {
@@ -863,9 +887,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             if (peerSlot >= 0) reportSenderBadVersion[peerSlot]++;
             return;
         }
-        mergeAssociation(header.senderMac, header.selectedBeacon,
+        const bool refreshed = mergeAssociation(header.senderMac, header.selectedBeacon,
                          header.wakeGeneration, 0, true);
-        if (peerSlot >= 0) reportSenderAssociationRefresh[peerSlot]++;
+        if (peerSlot >= 0 && refreshed) reportSenderAssociationRefresh[peerSlot]++;
         const size_t claimBytesAvailable = length - sizeof(header);
         const size_t available = claimBytesAvailable /
             sizeof(BeaconClaimEntry);
@@ -936,6 +960,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
     void dumpExchangePeers() const {
+        out("association-merge attempts %u accepted %u rejected %u invalid %u older-generation %u not-fresher %u table-full %u",
+            associationMergeAttempts, associationMergeAccepted,
+            associationMergeAttempts - associationMergeAccepted,
+            associationMergeInvalid, associationMergeOlder,
+            associationMergeNotFresher, associationMergeFull);
         size_t knownPeers = 0;
         for (const BeaconClaim &claim : claims) {
             if (claim.originMac == 0 || claim.originMac == deviceMac) continue;
@@ -1183,6 +1212,9 @@ public:
         reportRxCount = 0;
         reportRxClaimCount = 0;
         reportValidRxCount = 0;
+        associationMergeAttempts = associationMergeAccepted = 0;
+        associationMergeInvalid = associationMergeOlder = 0;
+        associationMergeNotFresher = associationMergeFull = 0;
         memset(reportSenders, 0, sizeof(reportSenders));
         memset(reportSenderRadioFrom, 0, sizeof(reportSenderRadioFrom));
         memset(reportSenderRaw, 0, sizeof(reportSenderRaw));
@@ -1351,8 +1383,8 @@ public:
             spiffsCurrentGoal = goal;
             spiffsCurrentRep = 0;
         }
-        beacon->seen2 -= startUsec;
-        const uint64_t packetRxTime = beacon->seen2;
+        const uint64_t packetRxLocalUsec = beacon->seen2;
+        const uint64_t packetRxTime = packetRxLocalUsec - startUsec;
         int beaconDistance = (int)(beacon->ts % goal);
         if (beaconDistance > (int)(goal / 2)) beaconDistance -= goal;
         int espDistance = (int)(packetRxTime % goal);
@@ -1365,25 +1397,34 @@ public:
         // clock. This makes two boards' logs directly comparable when they
         // are visiting the same beacon, even though their local micros()
         // clocks and serial log timestamps are unrelated.
-        const uint64_t beaconExchangeStart = beacon->ts +
-            (espNowStartUsec >= packetRxTime ?
-             espNowStartUsec - packetRxTime : 0);
-        const uint64_t beaconExchangeEnd = beacon->ts +
-            (espNowEndUsec >= packetRxTime ?
-             espNowEndUsec - packetRxTime : 0);
-        const uint64_t beaconCycle = beaconExchangeStart / goal;
-        const uint64_t beaconCycleStart = beaconCycle * goal;
-        const uint64_t beaconCycleStop = beaconCycleStart + goal;
-        const unsigned crossesBoundary = beaconExchangeEnd >= beaconCycleStop ? 1U : 0U;
-        out("beacon-clock target %012llx tsf-packet %llu exchange %llu-%llu cycle %llu start %llu stop %llu crosses-boundary %u",
-            (unsigned long long)beacon->ssid,
-            (unsigned long long)beacon->ts,
-            (unsigned long long)beaconExchangeStart,
-            (unsigned long long)beaconExchangeEnd,
-            (unsigned long long)beaconCycle,
-            (unsigned long long)beaconCycleStart,
-            (unsigned long long)beaconCycleStop,
-            crossesBoundary);
+        uint64_t beaconExchangeStart = 0, beaconExchangeEnd = 0;
+        const bool projectionValid = beacon->count != 0 &&
+            projectBeaconTsf(beacon->ts, packetRxLocalUsec,
+                             espNowStartUsec, beaconExchangeStart) &&
+            projectBeaconTsf(beacon->ts, packetRxLocalUsec,
+                             espNowEndUsec, beaconExchangeEnd);
+        out("beacon-clock-observation target %012llx tsf %llu local-rx %llu exchange-start-local %llu planned-end-local %llu completion-local %llu valid %u",
+            (unsigned long long)beacon->ssid, (unsigned long long)beacon->ts,
+            (unsigned long long)packetRxLocalUsec,
+            (unsigned long long)espNowStartUsec,
+            (unsigned long long)espNowEndUsec,
+            (unsigned long long)nowUsec, projectionValid ? 1U : 0U);
+        if (projectionValid) {
+            const uint64_t beaconCycle = beaconExchangeStart / goal;
+            const uint64_t beaconCycleStart = beaconCycle * goal;
+            const uint64_t beaconCycleStop = beaconCycleStart + goal;
+            // Half-open intervals ending at the boundary do not cross it.
+            const unsigned crossesBoundary = beaconExchangeEnd > beaconCycleStop ? 1U : 0U;
+            out("beacon-clock target %012llx tsf-packet %llu exchange %llu-%llu cycle %llu start %llu stop %llu crosses-boundary %u",
+                (unsigned long long)beacon->ssid,
+                (unsigned long long)beacon->ts,
+                (unsigned long long)beaconExchangeStart,
+                (unsigned long long)beaconExchangeEnd,
+                (unsigned long long)beaconCycle,
+                (unsigned long long)beaconCycleStart,
+                (unsigned long long)beaconCycleStop,
+                crossesBoundary);
+        }
 
         if (resetReason() == 5 || loopCount > 1) {
             out("slept %lld (%.1fs) rssi %d goal %.2fs rep %d beacon offset %d esp offset %d difference %d late (%.3f%%) scale %f",
