@@ -83,14 +83,19 @@ make BOARD=esp32
 ```
 
 Retain the persistent `build/` directory; do not run `make clean` during
-ordinary iteration. For local screen sessions named `usb0` through `usb3`:
+ordinary iteration. For local boards exposed as `/dev/ttyUSB0` through
+`/dev/ttyUSB3`:
 
 ```sh
 python3 scripts/deploy_usb_screens.py
 ```
 
-This builds once, uploads each matching `/dev/ttyUSB<N>`, and restarts append-
-mode logging into `cat.usbN.out`. Miner6 is a separate host with two boards.
+This builds once, terminates matching `*.usbN` screen sessions, uploads each
+selected `/dev/ttyUSB<N>`, and creates fresh detached screen sessions whose
+append-mode logger starts only after a successful upload. Use `--boards 0,1,2,3`
+to select explicit ports, `--erase-flash` for a destructive clean start, and
+`--keep-screens` only when deliberately reusing existing sessions. Logs append
+to `cat.usbN.out`. Miner6 is a separate host with two boards.
 When a committed tree is available, sync it with `git push`/`git pull` before
 building there. Direct binary transfer is a fallback when the remote build
 environment cannot build safely.

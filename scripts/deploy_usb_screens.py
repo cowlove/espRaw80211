@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Upload espRaw80211 to every screen session named usb<N> and restart logging.
+"""Upload espRaw80211 to USB boards and own their screen logger lifecycle.
 
-For each matching screen session this sends Ctrl-C to the current ``make cat``
-job, then runs the upload and, only after a successful upload, starts an
-append-mode serial logger in the same screen session.
+By default, boards are inferred from ``/dev/ttyUSB<N>``. Existing project
+screen sessions are terminated and recreated, so deployment does not depend
+on a healthy foreground shell or a manually started logger.
 """
 
 from __future__ import annotations
@@ -88,12 +88,20 @@ def find_sessions() -> list[UsbSession]:
     return sorted(sessions, key=lambda session: session.index)
 
 
-def screen_stuff(session: UsbSession, text: str, dry_run: bool) -> None:
-    command = ["screen", "-S", session.screen_id, "-X", "stuff", text]
+def screen_quit(session: UsbSession, dry_run: bool) -> None:
+    command = ["screen", "-S", session.screen_id, "-X", "quit"]
     if dry_run:
         print("$", " ".join(command))
         return
-    subprocess.run(command, check=True)
+    subprocess.run(command, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def start_screen(session: UsbSession, command: str, dry_run: bool) -> None:
+    screen_command = ["screen", "-dmS", session.screen_id, "bash", "-lc", command]
+    if dry_run:
+        print("$", " ".join(shlex.quote(part) for part in screen_command))
+        return
+    subprocess.run(screen_command, check=True)
 
 
 def deploy(
@@ -114,20 +122,29 @@ def deploy(
         f"make -C {shlex.quote(str(project))} BOARD=esp32 UPLOAD_PORT={session.port} cat "
         f"| tee -a {shlex.quote(str(project / session.logfile))}"
     )
-    # Ctrl-C stops the foreground make/cat pipeline without destroying the
-    # screen session or its shell. Send it separately from the command: some
-    # terminals consume the first command character when both arrive in one
-    # screen "stuff" payload.
     print(f"{session.name}: {session.port} -> {session.logfile}")
-    screen_stuff(session, "\003", dry_run)
-    if dry_run:
-        print("  (wait 0.25s)")
-    else:
-        time.sleep(0.25)
-    # The shell's && ensures upload and logging start only after an optional
-    # erase and the upload both succeed. Erasing is deliberately opt-in.
     command = f"{erase} && {upload}" if erase_flash else upload
-    screen_stuff(session, f"{command} && {monitor}\n", dry_run)
+    # A fresh shell owns the whole lifecycle. The logger starts only after a
+    # successful erase/upload and remains in the new screen session.
+    start_screen(session, f"{command} && {monitor}", dry_run)
+
+
+def discover_indices() -> list[int]:
+    return sorted(
+        int(match.group(1))
+        for path in Path("/dev").glob("ttyUSB*")
+        if (match := re.fullmatch(r"ttyUSB(\d+)", path.name))
+    )
+
+
+def parse_indices(value: str) -> list[int]:
+    try:
+        indices = sorted({int(item.strip()) for item in value.split(",") if item.strip()})
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("board indices must be comma-separated integers") from exc
+    if not indices or any(index < 0 for index in indices):
+        raise argparse.ArgumentTypeError("board indices must contain at least one nonnegative integer")
+    return indices
 
 
 def build_firmware(project: Path, dry_run: bool) -> None:
@@ -164,14 +181,32 @@ def main() -> int:
         default=None,
         help="esptool executable override; otherwise discover Arduino ESP32 esptool",
     )
+    parser.add_argument(
+        "--boards",
+        type=parse_indices,
+        default=None,
+        metavar="N[,N...]",
+        help="USB board indices; default is every detected /dev/ttyUSBN",
+    )
+    parser.add_argument(
+        "--keep-screens",
+        action="store_true",
+        help="reuse matching screen sessions instead of terminating/recreating them",
+    )
     args = parser.parse_args()
 
-    sessions = find_sessions()
-    if not sessions:
-        print("No screen sessions named usb<N> found.", file=sys.stderr)
+    indices = args.boards if args.boards is not None else discover_indices()
+    if not indices:
+        print("No /dev/ttyUSBN boards found; use --boards N[,N...] to specify them.", file=sys.stderr)
         return 1
+    existing = find_sessions()
+    sessions = [
+        next((session for session in existing if session.index == index),
+             UsbSession(f"esp.usb{index}", index))
+        for index in indices
+    ]
 
-    print("Found:", ", ".join(session.name for session in sessions))
+    print("Boards:", ", ".join(f"{session.name}={session.port}" for session in sessions))
     esptool = find_esptool(args.esptool)
     if args.erase_flash:
         if not esptool.is_file():
@@ -179,9 +214,14 @@ def main() -> int:
             return 1
         print(f"Flash erase enabled; using {esptool}")
     # Build before touching any screen session. A failed build leaves the
-    # existing serial monitors running and prevents concurrent make processes
-    # from fighting over the shared build directory.
+    # existing serial monitors running.
     build_firmware(args.project.resolve(), args.dry_run)
+    if not args.keep_screens:
+        for stale in (session for session in existing if session.index in indices):
+            print(f"Stopping {stale.screen_id}")
+            screen_quit(stale, args.dry_run)
+        if not args.dry_run:
+            time.sleep(0.25)
     for session in sessions:
         deploy(
             session,
