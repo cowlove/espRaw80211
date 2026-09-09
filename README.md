@@ -165,7 +165,7 @@ For migration-policy experiments, stop at the first global convergence so the
 The convergence marker's `time=` field is the clean-start convergence latency.
 No marker means that seed timed out without converging.
 
-Run the fixed 100-seed benchmark (about 20 seconds on the development host):
+Run the fixed 100-seed benchmark in parallel using all available processors:
 
 ```sh
 ./scripts/csim-benchmark.sh

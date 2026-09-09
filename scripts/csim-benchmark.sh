@@ -7,20 +7,23 @@ runner="$script_dir/run_csim.sh"
 iterations=100
 timeout_seconds=3600
 reception_scale=0.60
+jobs=$(nproc)
 
-results=$(mktemp "${TMPDIR:-/tmp}/espRaw80211-benchmark.XXXXXX")
+results_dir=$(mktemp -d "${TMPDIR:-/tmp}/espRaw80211-benchmark.XXXXXX")
+results="$results_dir/times"
 cleanup() {
-    rm -f -- "$results"
+    rm -rf -- "$results_dir"
 }
 trap cleanup EXIT
 
 echo "CSIM first-convergence benchmark"
 echo "  runs: $iterations"
+echo "  parallel jobs: $jobs"
 echo "  simulated timeout: ${timeout_seconds}s"
 echo "  reception scale: $reception_scale"
 
 for seed in $(seq 1 "$iterations"); do
-    convergence_time=$(
+    (
         "$runner" \
             --seconds "$timeout_seconds" \
             --reception-scale "$reception_scale" \
@@ -36,13 +39,16 @@ for seed in $(seq 1 "$iterations"); do
                         }
                     }
                 }
-            '
-    )
+            ' > "$results_dir/$seed"
+    ) &
 
-    if [[ -n "$convergence_time" ]]; then
-        printf '%s\n' "$convergence_time" >> "$results"
+    if (( seed % jobs == 0 )); then
+        wait
     fi
 done
+wait
+
+cat "$results_dir"/[0-9]* > "$results"
 
 sort -n -o "$results" "$results"
 
