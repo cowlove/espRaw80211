@@ -131,6 +131,15 @@ def epoch_acknowledgments(datasets, request_time):
     return acknowledged
 
 
+def latest_epoch_boundary(datasets, max_spread):
+    """Return the end of the latest complete, coordinated epoch reset wave."""
+    latest = epoch_acknowledgments(datasets, float('-inf'))
+    if len(latest) != len(datasets):
+        return None
+    times = list(latest.values())
+    return max(times) if max(times) - min(times) <= max_spread else None
+
+
 def atomic_request(path, token):
     path = Path(path)
     temporary = path.with_name(path.name + f'.{os.getpid()}.tmp')
@@ -209,6 +218,8 @@ def main():
     reset_time = None
     reset_token = None
     observation_floors = {}
+    last_epoch_time = None
+    epoch_history_checked = False
     last_status = None
     timestamped(f'started boards={required} poll={args.poll_seconds:g}s '
                 f'sustain={args.sustain_seconds:g}s stale={args.freshness_seconds:g}s')
@@ -216,6 +227,10 @@ def main():
         now = time.time()
         datasets = load_datasets(args.log_dir, args.remote_host, args.remote_dir,
                                  local_boards, remote_boards)
+        if not epoch_history_checked:
+            last_epoch_time = latest_epoch_boundary(
+                datasets, args.ack_timeout_seconds)
+            epoch_history_checked = True
         if reset_time is not None:
             acknowledged = epoch_acknowledgments(datasets, reset_time)
             missing = sorted(name for name, _ in datasets if name not in acknowledged)
@@ -226,6 +241,7 @@ def main():
             if len(acknowledged) == required:
                 timestamped(f'reset id={reset_token} complete; monitoring new epoch')
                 observation_floors = acknowledged
+                last_epoch_time = max(acknowledged.values())
                 reset_time = reset_token = None
                 candidate_home = candidate_since = None
                 last_status = None
@@ -251,7 +267,10 @@ def main():
         elif home != candidate_home:
             candidate_home, candidate_since = home, now
             last_status = None
-            timestamped(f'convergence candidate home={home}; sustain timer started', now)
+            elapsed = (f' since-reset={max(0, now-last_epoch_time):.0f}s'
+                       if last_epoch_time is not None else '')
+            timestamped(f'convergence candidate home={home}; sustain timer started{elapsed}',
+                        now)
         else:
             sustained = now - candidate_since
             status = f'converged home={home} sustained={sustained:.0f}s'
