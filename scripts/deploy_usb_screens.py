@@ -111,6 +111,7 @@ def deploy(
     dry_run: bool,
     erase_flash: bool,
     esptool: Path,
+    upload_template: list[str] | None = None,
 ) -> None:
     env = os.environ.copy()
     env['PATH'] = tool_path()
@@ -118,8 +119,12 @@ def deploy(
     if erase_flash:
         commands.append(shlex.split(esptool_command(esptool)) +
                         ['--chip', 'esp32', '--port', session.port, 'erase_flash'])
-    commands.append(['make', '-C', str(project), 'BOARD=esp32',
-                     f'UPLOAD_PORT={session.port}', 'upload-only'])
+    if upload_template is None:
+        commands.append(['make', '-C', str(project), 'BOARD=esp32',
+                         f'UPLOAD_PORT={session.port}', 'upload-only'])
+    else:
+        commands.append([session.port if part == '__UPLOAD_PORT__' else part
+                         for part in upload_template])
     # Flash synchronously: detached-screen success is not upload success.
     for command in commands:
         print('$', shlex.join(command))
@@ -177,6 +182,30 @@ def build_firmware(project: Path, dry_run: bool) -> None:
     print("ESP32 firmware build completed; starting uploads.")
 
 
+def upload_command_template(project: Path) -> list[str]:
+    """Resolve Make's upload recipe once, before parallel workers start.
+
+    makeEspArduino includes UPLOAD_PORT in its build-state bookkeeping, so
+    concurrent ``make upload`` processes can invalidate each other's shared
+    artifacts.  Workers therefore execute the already-resolved esptool command
+    directly and never enter Make concurrently.
+    """
+    probe_port = '/dev/ttyUSB0'
+    result = subprocess.run(
+        ['make', '-n', '-C', str(project), 'BOARD=esp32',
+         f'UPLOAD_PORT={probe_port}', 'upload-only'],
+        check=True, capture_output=True, text=True,
+        env={**os.environ, 'PATH': tool_path()},
+    )
+    lines = [line.strip() for line in result.stdout.splitlines()]
+    commands = [shlex.split(line) for line in lines
+                if ' write_flash ' in f' {line} ']
+    if len(commands) != 1 or probe_port not in commands[0]:
+        raise RuntimeError('could not resolve a unique esptool upload command')
+    return ['__UPLOAD_PORT__' if part == probe_port else part
+            for part in commands[0]]
+
+
 def deploy_parallel(
     sessions: list[UsbSession],
     project: Path,
@@ -191,11 +220,13 @@ def deploy_parallel(
             deploy(session, project, dry_run, erase_flash, esptool)
         return
 
+    upload_template = upload_command_template(project)
     failures: list[tuple[UsbSession, Exception]] = []
     print(f"Uploading {len(sessions)} boards with {jobs} parallel workers...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = {
-            executor.submit(deploy, session, project, False, erase_flash, esptool): session
+            executor.submit(deploy, session, project, False, erase_flash,
+                            esptool, upload_template): session
             for session in sessions
         }
         for future in concurrent.futures.as_completed(futures):

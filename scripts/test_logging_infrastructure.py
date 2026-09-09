@@ -47,11 +47,14 @@ class InfrastructureTests(unittest.TestCase):
 
     def test_parallel_deploy_visits_every_board(self):
         sessions = [deploy.UsbSession(f'esp.usb{i}', i) for i in range(3)]
-        with patch.object(deploy, 'deploy') as upload:
+        with patch.object(deploy, 'upload_command_template',
+                          return_value=['esptool', '--port', '__UPLOAD_PORT__']), \
+             patch.object(deploy, 'deploy') as upload:
             deploy.deploy_parallel(sessions, Path('/project'), False, False,
                                    Path('/tools/esptool'), 2)
         self.assertEqual({call.args[0].index for call in upload.call_args_list},
                          {0, 1, 2})
+        self.assertTrue(all(call.args[5] for call in upload.call_args_list))
 
 
 if __name__ == '__main__':
