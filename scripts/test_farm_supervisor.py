@@ -254,6 +254,7 @@ def main():
                 f'sustain={args.sustain_seconds:g}s stale={args.freshness_seconds:g}s')
     while True:
         now = time.time()
+        foreign_max_age = 2 * args.poll_seconds
         datasets = load_datasets(args.log_dir, args.remote_host, args.remote_dir,
                                  local_boards, remote_boards)
         if not epoch_history_checked:
@@ -264,14 +265,14 @@ def main():
             acknowledged = epoch_acknowledgments(datasets, reset_time)
             missing = sorted(name for name, _ in datasets if name not in acknowledged)
             status = (f'reset id={reset_token} acknowledged={len(acknowledged)}/{required}  '
-                      f'{foreign_status(datasets, now, args.freshness_seconds)}')
+                      f'{foreign_status(datasets, now, foreign_max_age)}')
             if status != last_status:
                 timestamped(status + (f' missing={",".join(missing)}' if missing else ''))
                 last_status = status
             if len(acknowledged) == required:
                 timestamped(
                     f'reset id={reset_token} complete; monitoring new epoch  '
-                    f'{foreign_status(datasets, now, args.freshness_seconds)}')
+                    f'{foreign_status(datasets, now, foreign_max_age)}')
                 observation_floors = acknowledged
                 last_epoch_time = max(acknowledged.values())
                 reset_time = reset_token = None
@@ -281,7 +282,7 @@ def main():
                 timestamped(
                     f'reset id={reset_token} blocked after {now-reset_time:.0f}s; '
                     f'missing={",".join(missing)}  '
-                    f'{foreign_status(datasets, now, args.freshness_seconds)}')
+                    f'{foreign_status(datasets, now, foreign_max_age)}')
             time.sleep(args.poll_seconds)
             continue
 
@@ -294,7 +295,7 @@ def main():
             topology = format_home_groups(groups, unknown)
             status = (reason if reason.startswith('NC') else f'not converged: {reason}')
             status += f' | {topology}' if topology else ''
-            status += f'  {foreign_status(datasets, now, args.freshness_seconds)}'
+            status += f'  {foreign_status(datasets, now, foreign_max_age)}'
             if status != last_status:
                 timestamped(status, now)
                 last_status = status
@@ -304,13 +305,13 @@ def main():
             last_status = None
             elapsed = (f' since-reset={max(0, now-last_epoch_time):.0f}s'
                        if last_epoch_time is not None else '')
-            foreign = foreign_status(datasets, now, args.freshness_seconds)
+            foreign = foreign_status(datasets, now, foreign_max_age)
             timestamped(f'candidate home={beacon_alias(home)}; sustain timer started{elapsed}  {foreign}',
                         now)
         else:
             sustained = now - candidate_since
             status = (f'converged home={home} sustained={sustained:.0f}s  '
-                      f'{foreign_status(datasets, now, args.freshness_seconds)}')
+                      f'{foreign_status(datasets, now, foreign_max_age)}')
             if status != last_status:
                 timestamped(status, now)
                 last_status = status
@@ -319,7 +320,7 @@ def main():
                 reset_time = time.time()
                 timestamped(
                     f'requesting coordinated cold reset id={reset_token} home={home}  '
-                    f'{foreign_status(datasets, now, args.freshness_seconds)}')
+                    f'{foreign_status(datasets, now, foreign_max_age)}')
                 issue_reset_requests(args.remote_host, local_boards, remote_boards,
                                      reset_token, args.dry_run)
                 if args.dry_run:
