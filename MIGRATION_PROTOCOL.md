@@ -17,8 +17,8 @@ The protocol tries to coalesce independently starting boards onto one beacon
 without allowing incomplete or stale gossip to fragment an established group.
 Its main invariants are:
 
-- A singleton may quickly join a directly observed group, either by scouting it
-  or by hearing one of its members visit the singleton's home.
+- A board may learn about another group either by scouting that group or by
+  hearing one of its members visit the board's home.
 - An established member may move only toward a group believed to be strictly
   larger than its current group.
 - Claim gossip alone must not move an established member.
@@ -120,9 +120,9 @@ RSSI and packet count do not authorize a home change.
 ### 2. Direct ESP-NOW reports during an appointment
 
 A valid report identifies its physical sender and the sender's selected beacon.
-During a scout this triggers evaluation of the scout target. During a
-singleton's home appointment, a visiting scout advertising another home can
-trigger reverse-discovery evaluation.
+During a scout this triggers evaluation of the scout target. During a home
+appointment, a visiting scout advertising another home can trigger
+reverse-discovery evaluation through the same migration policy.
 
 ### 3. Fresh association table
 
@@ -170,6 +170,14 @@ complete scout appointment
                |
                +-- otherwise
                        -> reject the target, or cancel its pending proposal
+
+complete home appointment
+    |
+    +-- no direct visitor advertising an eligible alternative home
+    |       -> no reverse migration evaluation
+    |
+    +-- choose largest advertised eligible group
+            -> apply the same singleton/adopt or established/propose flow above
 ```
 
 There is no `healthy && full` prerequisite for scout evaluation. Positive
@@ -192,23 +200,24 @@ applies.
 The rule intentionally does not allow singleton-to-singleton movement. Such a
 move would not improve coalescence and could create oscillation.
 
-### Visitor invitations at a singleton's home
+### Visitor evidence at home
 
-A singleton need not personally scout the larger group. A member of that group
-may scout the singleton's home while continuing to advertise its real selected
-beacon. The singleton evaluates only packets received during that exact home
-appointment. An invitation target must:
+A board need not personally scout the larger group. A member of that group may
+scout the board's home while continuing to advertise its real selected beacon.
+The board evaluates only packets received during that exact home appointment.
+A visitor target must:
 
 - be advertised by a directly heard visitor;
-- differ from the singleton's current home;
+- differ from the board's current home;
 - have at least two fresh associated members; and
 - remain locally visible, eligible, and supported by fresh beacon timing.
 
-If several visitors advertise eligible destinations, the singleton chooses the
-largest fresh group estimate, breaking equal-size ties by lowest BSSID. It then
-commits immediately, with no credibility delay. A partial home appointment may
-provide positive invitation evidence; missing traffic is never negative
-evidence. This path is disabled as soon as the board is no longer a singleton.
+If several visitors advertise eligible destinations, the board chooses the
+largest fresh group estimate, breaking equal-size ties by lowest BSSID. A true
+singleton commits immediately when the target has at least two members. An
+established group member uses the normal strictly-larger test and
+credibility-delayed proposal path. A partial home appointment may provide
+positive visitor evidence; missing traffic is never negative evidence.
 
 ## Established-member behavior
 
@@ -390,6 +399,10 @@ result: no migration evaluation and no negative membership conclusion
 - `singleton-join direct`: immediate singleton adoption.
 - `singleton-join visitor`: immediate adoption of a group advertised by a
   visitor during the singleton's home appointment.
+- `visitor-positive-evidence`: a directly heard visitor advertised an eligible
+  alternative home during this home appointment.
+- `migration-proposal visitor`: an established member proposed a larger group
+  learned from a visitor; confirmation is identical to a scout proposal.
 - `migration-proposal direct`: new proposal, group estimates, credibility, and
   activation round.
 - `migration-proposal refreshed`: same target seen again.
@@ -479,6 +492,12 @@ on scout completion(target):
         target snapshot = targetN,
         activation = current round + delay(home credibility)
     }
+
+on home completion(home):
+    visitors = directPacketsReceivedDuringThisAppointment()
+    candidates = eligibleFreshHomesAdvertisedBy(visitors)
+    if candidates:
+        evaluate largestThenLowestBssid(candidates) using the same flow above
 
 on healthy full home completion(home):
     update home credibility

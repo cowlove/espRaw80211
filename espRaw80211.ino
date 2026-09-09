@@ -935,11 +935,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             full ? 1U : 0U, (unsigned)reportSenderCount);
     }
 
-    void observeDirectScoutForMigration(uint64_t homeBssid, uint64_t targetBssid) {
+    void observeGroupForMigration(uint64_t homeBssid, uint64_t targetBssid,
+                                  const char *source) {
         const size_t homeMembers = listenerCount(homeBssid);
         const size_t targetMembers = listenerCount(targetBssid);
         if (SingletonJoinPolicy::mayAdopt(homeMembers, targetMembers)) {
-            out("singleton-join direct target %012llx members %u from %012llx",
+            out("singleton-join %s target %012llx members %u from %012llx",
+                source,
                 (unsigned long long)targetBssid, (unsigned)targetMembers,
                 (unsigned long long)homeBssid);
             commitHome(targetBssid);
@@ -979,7 +981,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         spiffsProposalHome = homeBssid;
         spiffsProposalActRound = wakeGeneration + delay;
         spiffsProposalMembers = (uint32_t)targetMembers;
-        out("migration-proposal direct target %012llx target-members %u home %012llx home-members %u credibility %u act-round %u",
+        out("migration-proposal %s target %012llx target-members %u home %012llx home-members %u credibility %u act-round %u",
+            source,
             (unsigned long long)targetBssid, (unsigned)targetMembers,
             (unsigned long long)homeBssid, (unsigned)homeMembers,
             credibility, wakeGeneration + delay);
@@ -1010,7 +1013,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
     bool adoptDirectlyObservedGroup(uint64_t homeBssid, uint64_t targetBssid) {
-        observeDirectScoutForMigration(homeBssid, targetBssid);
+        observeGroupForMigration(homeBssid, targetBssid, "direct");
         return spiffsBeacon.read() == targetBssid;
     }
 
@@ -1363,9 +1366,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         return false;
     }
 
-    uint64_t singletonVisitorInvitation(size_t appointment, uint64_t homeBssid,
-                                        uint64_t now) const {
-        if (appointment >= 4 || listenerCount(homeBssid) != 1) return 0;
+    uint64_t visitorInvitation(size_t appointment, uint64_t homeBssid,
+                               uint64_t now) const {
+        if (appointment >= 4) return 0;
         uint64_t best = 0;
         size_t bestMembers = 0;
         for (uint8_t i = 0; i < reportSenderCount; ++i) {
@@ -1672,14 +1675,15 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                         maybeCommitMigration(a.bssid);
                     if (spiffsBeacon.read() == a.bssid) {
                         const uint64_t invitation =
-                            singletonVisitorInvitation(i, a.bssid, now);
+                            visitorInvitation(i, a.bssid, now);
                         if (invitation) {
-                            out("singleton-join visitor target %012llx members %u from %012llx full %u",
+                            out("visitor-positive-evidence target %012llx members %u from %012llx full %u",
                                 (unsigned long long)invitation,
                                 (unsigned)listenerCount(invitation),
                                 (unsigned long long)a.bssid,
                                 state.full ? 1U : 0U);
-                            commitHome(invitation);
+                            observeGroupForMigration(a.bssid, invitation,
+                                                     "visitor");
                         }
                     }
                     if (healthy && state.full &&
