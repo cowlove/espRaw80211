@@ -4,14 +4,37 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 runner="$script_dir/run_csim.sh"
 
-default_iterations=200
-requested_iterations=${1:-$default_iterations}
-if (( $# > 1 )) || [[ ! $requested_iterations =~ ^[0-9]+$ ]] ||
-        (( requested_iterations < 1 )); then
-    echo "usage: $0 [iterations]" >&2
+usage() {
+    echo "usage: $0 [--iterations N] [csim arguments...]" >&2
+}
+
+iterations=200
+csim_arguments=()
+while (( $# )); do
+    case $1 in
+        --iterations)
+            if (( $# < 2 )); then usage; exit 2; fi
+            iterations=$2
+            shift 2
+            ;;
+        --iterations=*)
+            iterations=${1#*=}
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            csim_arguments+=("$1")
+            shift
+            ;;
+    esac
+done
+if [[ ! $iterations =~ ^[0-9]+$ ]] || (( iterations < 1 )); then
+    usage
     exit 2
 fi
-iterations=$requested_iterations
 timeout_seconds=3600
 reception_scale=0.60
 jobs=$(nproc)
@@ -27,7 +50,12 @@ echo "CSIM first-convergence benchmark"
 echo "  runs: $iterations"
 echo "  parallel jobs: $jobs"
 echo "  simulated timeout: ${timeout_seconds}s"
-echo "  reception scale: $reception_scale"
+echo "  default reception scale: $reception_scale"
+if (( ${#csim_arguments[@]} )); then
+    printf '  CSIM overrides:'
+    printf ' %q' "${csim_arguments[@]}"
+    printf '\n'
+fi
 
 for seed in $(seq 1 "$iterations"); do
     (
@@ -35,7 +63,8 @@ for seed in $(seq 1 "$iterations"); do
             --seconds "$timeout_seconds" \
             --reception-scale "$reception_scale" \
             --random-seed "$seed" \
-            --exit-on-convergence 2>/dev/null |
+            --exit-on-convergence \
+            "${csim_arguments[@]}" 2>/dev/null |
             awk '
                 /CSIM GLOBAL CONVERGENCE/ {
                     for (i = 1; i <= NF; i++) {
