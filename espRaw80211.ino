@@ -405,10 +405,12 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     bool singletonAggressiveWake = false;
     uint64_t beaconReceivedAtUsec = 0;
 
-    void executeTestReset(uint64_t homeBssid) {
-        out("TEST RESET EXECUTED on %012llx",
-            (unsigned long long)homeBssid);
+    void clearRendezvousTestState() {
         spiffsBeacon = (uint64_t)0;
+        spiffsSleepTime = (uint64_t)0;
+        spiffsCurrentGoal = (uint64_t)0;
+        spiffsCurrentRep = 0;
+        spiffsScale = 1.0f;
         spiffsClaims = string("");
         spiffsAssociations = string("");
         spiffsOrigins = string("");
@@ -436,6 +438,48 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         spiffsTestResetDelayCycles = 0;
         memset(claims, 0, sizeof(claims));
         memset(associations, 0, sizeof(associations));
+    }
+
+    void executeTestReset(uint64_t homeBssid) {
+        out("TEST RESET EXECUTED on %012llx",
+            (unsigned long long)homeBssid);
+        clearRendezvousTestState();
+    }
+
+    bool coldResetStartsTestEpoch() const {
+#if ARTIFICIAL_TEST_COLD_RESET_CLEARS_STATE && !defined(CSIM)
+        // ESP32's EN/power-domain reset is reported as POWERON_RESET (1).
+        // Deep sleep is 5 and the distributed test reset uses deep sleep after
+        // clearing state, so neither can recursively start another epoch.
+        return resetReason() == 1;
+#else
+        return false;
+#endif
+    }
+
+    void beginColdResetTestEpoch() {
+        clearRendezvousTestState();
+        const uint64_t minimum =
+            (uint64_t)ARTIFICIAL_TEST_COLD_RESET_MIN_SLEEP_SECONDS * 1000000ULL;
+        const uint64_t jitterRange =
+            (uint64_t)ARTIFICIAL_TEST_COLD_RESET_JITTER_SECONDS * 1000000ULL;
+#ifdef CSIM
+        const uint64_t randomValue =
+            ((uint64_t)(uint32_t)rand() << 32) | (uint32_t)rand();
+#else
+        const uint64_t randomValue =
+            ((uint64_t)esp_random() << 32) | esp_random();
+#endif
+        const uint64_t delay = minimum + (jitterRange ?
+            randomValue % (jitterRange + 1) : 0);
+        out("TEST EPOCH RESET reason=cold delay-usec=%llu",
+            (unsigned long long)delay);
+        fflush(stdout);
+#ifndef CSIM
+        uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
+#endif
+        esp_sleep_enable_timer_wakeup(delay);
+        esp_deep_sleep_start();
     }
 
     void maybeResetAfterStableReunion(uint64_t homeBssid,
@@ -2194,6 +2238,7 @@ public:
             ESP.getEfuseMac();
 #endif
         SPIFFSVariableESP32Base::begin();
+        if (coldResetStartsTestEpoch()) beginColdResetTestEpoch();
         if (spiffsTestSwarmCount.read() != testClusterSize) {
             // Do not inherit a streak/committed reset from a different oracle.
             spiffsTestConsensusCycles = 0;

@@ -13,7 +13,27 @@ import uuid
 from pathlib import Path
 
 
-def reconnect_log(board, port, logfile, retry=1.0):
+def default_reset_request_file(board):
+    return Path('/tmp') / f'espRaw80211-{board}.reset-request'
+
+
+def requested_reset(path):
+    """Return the request token, leaving the flag in place until reset succeeds."""
+    try:
+        return path.read_text(encoding='utf-8').strip() or 'requested'
+    except FileNotFoundError:
+        return None
+
+
+def pulse_hard_reset(source):
+    """Pulse ESP32 EN while keeping IO0 high for normal flash boot."""
+    source.setDTR(False)  # IO0 high
+    source.setRTS(True)   # EN low
+    time.sleep(0.1)
+    source.setRTS(False)  # EN high
+
+
+def reconnect_log(board, port, logfile, retry=1.0, reset_request_file=None):
     """Append across reconnects. Socket paths survive ttyUSB renumbering.
 
     A new session prevents analyzers joining partial exchanges across a gap.
@@ -21,6 +41,7 @@ def reconnect_log(board, port, logfile, retry=1.0):
     """
     import serial
     host = socket.gethostname()
+    reset_request_file = Path(reset_request_file or default_reset_request_file(board))
     while True:
         session = f"{host}-{uuid.uuid4().hex}"
         def emit(payload):
@@ -41,6 +62,12 @@ def reconnect_log(board, port, logfile, retry=1.0):
                 emit(f'logger-session host={host} pid={os.getpid()} reconnect=1')
                 pending = b''
                 while True:
+                    token = requested_reset(reset_request_file)
+                    if token is not None:
+                        emit(f'logger-reset-request id={token}')
+                        pulse_hard_reset(source)
+                        reset_request_file.unlink(missing_ok=True)
+                        emit(f'logger-reset-pulsed id={token}')
                     chunk = source.read(4096)
                     pending += chunk
                     while b'\n' in pending:
@@ -62,9 +89,12 @@ def main() -> int:
     parser.add_argument("--board", required=True)
     parser.add_argument("--port", required=True)
     parser.add_argument('--logfile', help='own serial port and reconnect; append to this log')
+    parser.add_argument('--reset-request-file',
+                        help='flag file whose contents request one ESP32 EN reset')
     args = parser.parse_args()
     if args.logfile:
-        reconnect_log(args.board, args.port, args.logfile)
+        reconnect_log(args.board, args.port, args.logfile,
+                      reset_request_file=args.reset_request_file)
         return 0
 
     host = socket.gethostname()

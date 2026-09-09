@@ -8,3 +8,11 @@
 // The offline analyzer reads this same definition; edit here for the next run.
 #define ARTIFICIAL_TEST_SWARM_BOARD_COUNT 7
 static_assert(ARTIFICIAL_TEST_SWARM_BOARD_COUNT > 0, "Test swarm must be nonempty");
+
+// Dedicated hardware-farm behavior. A cold EN/power reset starts a new clean
+// test epoch; ordinary deep-sleep wakes and software resets do not. After the
+// state clear, remain asleep long enough for the supervisor to reset the whole
+// farm, then stagger startup over two additional rendezvous periods.
+#define ARTIFICIAL_TEST_COLD_RESET_CLEARS_STATE 1
+#define ARTIFICIAL_TEST_COLD_RESET_MIN_SLEEP_SECONDS 60
+#define ARTIFICIAL_TEST_COLD_RESET_JITTER_SECONDS 60

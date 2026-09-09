@@ -53,6 +53,19 @@ class AnalyzerTailTests(unittest.TestCase):
         self.assertEqual(rows[0]['minimum_size'], 1)
         self.assertEqual(rows[0]['latency'], 0.0)
 
+    def test_epoch_recovery_waits_for_every_post_marker_home(self):
+        marker_a = b'2026-09-09T08:00:00+00:00 host_mono_ns=1 board=a port=p session=s | 00000.1 TEST EPOCH RESET reason=cold delay-usec=60000000\n'
+        marker_b = b'2026-09-09T08:00:02+00:00 host_mono_ns=2 board=b port=p session=s | 00000.1 TEST EPOCH RESET reason=cold delay-usec=90000000\n'
+        cycles_a = [SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:01:05+00:00'), home='deadbeef')]
+        cycles_b = [SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:01:35+00:00'), home='deadbeef')]
+        with patch.object(analyzer.evidence, 'parse_evidence',
+                          side_effect=[(cycles_a, 0), (cycles_b, 0)]):
+            rows = analyzer.epoch_recovery_events(
+                [('a', marker_a), ('b', marker_b)], required=2)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['bssid'], 'deadbeef')
+        self.assertEqual(rows[0]['latency'], 93.0)
+
 
 if __name__ == '__main__':
     unittest.main()

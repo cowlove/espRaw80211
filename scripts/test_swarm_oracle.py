@@ -10,6 +10,12 @@ from test_swarm_config import swarm_board_count
 
 
 class SwarmOracleTests(unittest.TestCase):
+    def test_cold_epoch_delay_is_one_to_three_rendezvous_periods(self):
+        config = (Path(__file__).resolve().parents[1] / 'testSwarmConfig.h').read_text()
+        self.assertIn('#define ARTIFICIAL_TEST_COLD_RESET_CLEARS_STATE 1', config)
+        self.assertIn('#define ARTIFICIAL_TEST_COLD_RESET_MIN_SLEEP_SECONDS 60', config)
+        self.assertIn('#define ARTIFICIAL_TEST_COLD_RESET_JITTER_SECONDS 60', config)
+
     def test_shared_parameter(self):
         self.assertGreater(swarm_board_count(), 0)
         with tempfile.TemporaryDirectory() as directory:

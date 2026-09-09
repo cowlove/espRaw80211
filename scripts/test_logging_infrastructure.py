@@ -6,9 +6,65 @@ from unittest.mock import patch
 
 import analyze_rendezvous as analyzer
 import deploy_usb_screens as deploy
+import test_farm_supervisor as supervisor
+import timestamp_serial as serial_logger
 
 
 class InfrastructureTests(unittest.TestCase):
+    def test_reset_request_survives_until_consumed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'usb0.request'
+            path.write_text('epoch-17\n')
+            self.assertEqual(serial_logger.requested_reset(path), 'epoch-17')
+            self.assertTrue(path.exists())
+
+    def test_hard_reset_keeps_io0_high(self):
+        source = unittest.mock.Mock()
+        with patch.object(serial_logger.time, 'sleep'):
+            serial_logger.pulse_hard_reset(source)
+        self.assertEqual(source.method_calls, [
+            unittest.mock.call.setDTR(False),
+            unittest.mock.call.setRTS(True),
+            unittest.mock.call.setRTS(False),
+        ])
+
+    def test_supervisor_requires_fresh_unanimous_homes(self):
+        now = 1_800_000_000
+        def board(name, home, age=1):
+            line = (f'2027-01-15T08:00:00+00:00 host_mono_ns=1 board={name} '
+                    f'port=p session=s | 00001.0 @i e=aa w=1 v=7 max=180\n'
+                    f'2027-01-15T08:00:01+00:00 host_mono_ns=2 board={name} '
+                    f'port=p session=s | 00002.0 @e begin=1\n'
+                    f'2027-01-15T08:00:02+00:00 host_mono_ns=3 board={name} '
+                    f'port=p session=s | 00003.0 gossip home exchange healthy home {home} listeners 7 rawrx 3 rx 3 valid 3 peers 1\n'
+                    f'2027-01-15T08:00:03+00:00 host_mono_ns=4 board={name} '
+                    f'port=p session=s | 00004.0 @e end=1\n')
+            data = line.encode()
+            parsed = supervisor.evidence.summarize(data)
+            parsed['latest']['host_time'] = now - age
+            return data, parsed
+        datasets, summaries = [], {}
+        for index in range(7):
+            name = f'board{index}'
+            data, summaries[name] = board(name, 'abc')
+            datasets.append((name, data))
+        with patch.object(supervisor.evidence, 'summarize',
+                          side_effect=lambda data: next(
+                              summaries[name] for name, value in datasets if value is data)):
+            home, reason = supervisor.convergence_snapshot(datasets, now, 7, 180)
+        self.assertEqual((home, reason), ('abc', None))
+
+    def test_epoch_ack_requires_marker_after_request(self):
+        data = (
+            b'2026-09-09T10:00:00+00:00 host_mono_ns=1 board=usb0 port=p session=s | TEST EPOCH RESET reason=cold delay-usec=60000000\n'
+        )
+        marker = supervisor.evidence.timestamp('2026-09-09T10:00:00+00:00')
+        self.assertEqual(supervisor.epoch_acknowledgments([('usb0', data)],
+                                                          marker - 1), {'usb0'})
+        self.assertEqual(supervisor.epoch_acknowledgments([('usb0', data)],
+                                                          marker + 5), set())
+
     def test_prefixed_cycle_matches_legacy(self):
         lines = ['00005.0 ESP-NOW exchange phase started',
                  '00010.0 gossip home exchange healthy home abc listeners 6',

@@ -344,6 +344,78 @@ def print_reset_recovery(datasets, required: int) -> None:
         print(f"  summary completed={len(completed)}/{len(results)} median={statistics.median(values):.1f}s min={min(values):.1f}s max={max(values):.1f}s")
 
 
+def epoch_recovery_events(datasets, required: int, marker_skew: float = 15,
+                          observation_skew: float = 90):
+    """Measure complete cold-reset epochs to the next observed consensus."""
+    markers = []
+    observations = []
+    board_names = {name for name, _ in datasets}
+    for name, data in datasets:
+        for _, _, wall, body in evidence.records(data):
+            if wall is not None and 'TEST EPOCH RESET ' in body:
+                markers.append((wall, name))
+        for cycle in evidence.parse_evidence(data)[0]:
+            if cycle.wall is not None and cycle.home:
+                observations.append((cycle.wall, name, cycle.home))
+    markers.sort()
+    observations.sort()
+    waves = []
+    candidate = {}
+    for wall, name in markers:
+        if (candidate and (wall - min(candidate.values()) > marker_skew or
+                           name in candidate)):
+            candidate = {}
+        candidate[name] = wall
+        if len(candidate) == required and set(candidate) == board_names:
+            waves.append(dict(candidate))
+            candidate = {}
+
+    results = []
+    wave_starts = [min(wave.values()) for wave in waves]
+    for index, wave in enumerate(waves):
+        wave_end = max(wave.values())
+        next_start = wave_starts[index + 1] if index + 1 < len(waves) else float('inf')
+        latest = {}
+        consensus = None
+        for wall, name, home in observations:
+            if wall <= wave[name] or wall >= next_start:
+                continue
+            latest[name] = (wall, home)
+            if len(latest) != required:
+                continue
+            times = [value[0] for value in latest.values()]
+            homes = {value[1] for value in latest.values()}
+            if len(homes) == 1 and max(times) - min(times) <= observation_skew:
+                consensus = (wall, next(iter(homes)))
+                break
+        results.append({
+            'epoch_time': wave_end,
+            'consensus_time': consensus[0] if consensus else None,
+            'bssid': consensus[1] if consensus else None,
+            'latency': consensus[0] - wave_end if consensus else None,
+        })
+    return results
+
+
+def print_epoch_recovery(datasets, required: int) -> None:
+    print('Clean epoch recovery | final cold-reset marker → emerging consensus')
+    results = epoch_recovery_events(datasets, required)
+    if not results:
+        print('  no complete TEST EPOCH RESET waves in selected logs')
+        return
+    completed = []
+    for row in results:
+        epoch = datetime.fromtimestamp(row['epoch_time']).astimezone().isoformat(timespec='seconds')
+        if row['latency'] is None:
+            print(f'  epoch={epoch} consensus=pending')
+            continue
+        completed.append(row['latency'])
+        consensus = datetime.fromtimestamp(row['consensus_time']).astimezone().isoformat(timespec='seconds')
+        print(f"  epoch={epoch} consensus={consensus} latency={row['latency']:.1f}s home={row['bssid']}")
+    if completed:
+        print(f'  summary completed={len(completed)}/{len(results)} median={statistics.median(completed):.1f}s min={min(completed):.1f}s max={max(completed):.1f}s')
+
+
 def current_home_distribution(datasets, summaries=None):
     """Group each logged board's latest observed home by BSSID.
 
@@ -769,6 +841,8 @@ def main() -> int:
                     help="maximum suffix read per log; 0 or -1 reads the full file (default: 1000000)")
     ap.add_argument("--convergence", action="store_true", help="show cycles from reset execution to next 10/10 consensus")
     ap.add_argument("--reset-recovery", action="store_true", help="measure reset-wave execution to next emerging same-home consensus")
+    ap.add_argument("--epoch-recovery", action="store_true",
+                    help="measure complete cold-reset epoch waves to emerging consensus")
     ap.add_argument("--session", default="latest", help="latest (default), all, or an exact logger session ID")
     ap.add_argument("--since", help="inclusive ISO host timestamp with timezone")
     ap.add_argument("--until", help="inclusive ISO host timestamp with timezone")
@@ -878,10 +952,12 @@ def main() -> int:
             for note in caveats:
                 print('Note: ' + note)
         return 0
-    if args.convergence or args.reset_recovery:
+    if args.convergence or args.reset_recovery or args.epoch_recovery:
         print_current_home_distribution(datasets)
         if args.reset_recovery:
             print_reset_recovery(datasets, swarm_board_count())
+        if args.epoch_recovery:
+            print_epoch_recovery(datasets, swarm_board_count())
         if not args.convergence:
             return 0
         print("Convergence dashboard | KPI = complete wake/sleep cycles after flush until 10/10 consensus")
