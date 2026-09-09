@@ -668,7 +668,8 @@ def rendezvous_dashboard(name: str, data: bytes) -> bool:
         return False
     latest = cycles[-1]
     state = "QUALIFIED" if qualified and qualified[-1] is latest else "not-qualified"
-    print(f"{name:<12} rendezvous={state:<12} artificial-test-board-count={required} qualified={len(qualified):3d}  latest-home={latest.home}  latest-listeners={latest.listeners}  latest-exchange={'healthy' if latest.healthy else 'incomplete'}")
+    reset = latest.reset or '-'
+    print(f"{name:<12} rendezvous={state:<12} artificial-test-board-count={required} qualified={len(qualified):3d}  latest-consensus={latest.consensus:<5}  reset={reset:<8}  latest-home={latest.home}  latest-listeners={latest.listeners}  latest-exchange={'healthy' if latest.healthy else 'incomplete'}")
     return state == "QUALIFIED"
 
 

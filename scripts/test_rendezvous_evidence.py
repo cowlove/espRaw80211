@@ -29,6 +29,14 @@ def cycle(epoch='aa', wake=1, bssid='abc', start=1000000, end=6000000,
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_rendezvous_status_shows_current_consensus_progress(self):
+        data = cycle(extra=line('00009.9 test consensus 7/10'))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            analyzer.rendezvous_dashboard('usb0', data)
+        self.assertIn('latest-consensus=7/10', output.getvalue())
+        self.assertIn('reset=-', output.getvalue())
+
     def test_v7_multiple_exchanges_in_one_round(self):
         def exchange(sequence, extra=b''):
             return cycle(epoch='bb', wake=2, extra=extra).replace(
