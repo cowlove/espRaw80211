@@ -157,4 +157,46 @@ inline uint64_t chooseScout(const uint64_t *eligible, size_t count,
     return next ? next : smallest;
 }
 
+// Optional stateless weighted exploration. Every eligible non-home beacon
+// gets one ticket; a priority entry adds extraTickets more. Callers use the
+// fair rotating selector above when extraTickets is zero.
+inline uint64_t chooseWeightedScout(const uint64_t *eligible, size_t count,
+                                    const uint64_t *priority,
+                                    size_t priorityCount, uint64_t home,
+                                    uint32_t randomValue,
+                                    size_t extraTickets) {
+    size_t tickets = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (!eligible[i] || eligible[i] == home) continue;
+        bool duplicate = false;
+        for (size_t prior = 0; prior < i; ++prior)
+            if (eligible[prior] == eligible[i]) duplicate = true;
+        if (duplicate) continue;
+        ++tickets;
+        for (size_t j = 0; j < priorityCount; ++j)
+            if (priority[j] == eligible[i]) {
+                tickets += extraTickets;
+                break;
+            }
+    }
+    if (!tickets) return 0;
+    size_t ticket = randomValue % tickets;
+    for (size_t i = 0; i < count; ++i) {
+        if (!eligible[i] || eligible[i] == home) continue;
+        bool duplicate = false;
+        for (size_t prior = 0; prior < i; ++prior)
+            if (eligible[prior] == eligible[i]) duplicate = true;
+        if (duplicate) continue;
+        size_t weight = 1;
+        for (size_t j = 0; j < priorityCount; ++j)
+            if (priority[j] == eligible[i]) {
+                weight += extraTickets;
+                break;
+            }
+        if (ticket < weight) return eligible[i];
+        ticket -= weight;
+    }
+    return 0;
+}
+
 } // namespace RendezvousPlanner

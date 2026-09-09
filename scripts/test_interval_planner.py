@@ -72,6 +72,13 @@ int main() {
     assert(chooseScout(candidates,6,20,40)==10);
     assert(chooseScout(candidates,6,20,25)==30); // removed previous candidate
     assert(chooseScout(nullptr,0,20,0)==0);
+    uint64_t priority[]={40};
+    // Eligible tickets are 30,10,40, with two additional tickets for 40.
+    assert(chooseWeightedScout(candidates,6,priority,1,20,0,2)==30);
+    assert(chooseWeightedScout(candidates,6,priority,1,20,1,2)==10);
+    assert(chooseWeightedScout(candidates,6,priority,1,20,2,2)==40);
+    assert(chooseWeightedScout(candidates,6,priority,1,20,3,2)==40);
+    assert(chooseWeightedScout(candidates,6,priority,1,20,4,2)==40);
     Appointment a;
     assert(nextAppointment(1,0,0,0,30,5,5,true,a));
     assert(a.start==5 && a.end==10 && !a.late);

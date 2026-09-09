@@ -144,6 +144,11 @@ Scouting is considered every two logical rounds. Eligible non-home beacons are
 visited in a fair rotating sequence. Overlapping or nearby radio windows may
 be merged into one awake interval.
 
+The implementation retains an optional weighted targeting experiment:
+`targetedScoutExtraTickets` gives fresh, locally visible rumored-singleton
+beacons additional random-selection tickets. It is currently zero, so the
+experiment is disabled and scout selection follows the fair rotation above.
+
 The scheduler may discover that an appointment has already partly elapsed when
 it builds or enters the interval. Such an appointment is partial (`full 0`),
 but received packets remain real observations.
