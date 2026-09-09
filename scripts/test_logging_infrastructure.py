@@ -75,6 +75,23 @@ class InfrastructureTests(unittest.TestCase):
         self.assertIsNone(home)
         self.assertEqual(reason, 'usb0 awaiting post-epoch home observation')
 
+    def test_supervisor_formats_compact_grouped_topology(self):
+        groups = {
+            '60a4b792da8a': ['local usb3', 'miner6 usb1', 'local usb0'],
+            '66a4b792e676': ['miner6 usb0', 'local usb4'],
+        }
+        self.assertEqual(
+            supervisor.format_home_groups(groups, ['local usb2', 'local usb1']),
+            '60a4b792da8a=L0,L3,M1 66a4b792e676=L4,M0 ?=L1,L2')
+
+    def test_supervisor_timestamp_is_compact(self):
+        with patch.object(supervisor.time, 'localtime') as localtime, \
+             patch('builtins.print') as output:
+            localtime.return_value = supervisor.time.struct_time(
+                (2026, 9, 9, 7, 8, 9, 2, 252, -1))
+            supervisor.timestamped('not converged', 123)
+        output.assert_called_once_with('07:08:09 not converged', flush=True)
+
     def test_prefixed_cycle_matches_legacy(self):
         lines = ['00005.0 ESP-NOW exchange phase started',
                  '00010.0 gossip home exchange healthy home abc listeners 6',

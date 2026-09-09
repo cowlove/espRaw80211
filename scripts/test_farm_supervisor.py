@@ -23,6 +23,68 @@ import rendezvous_evidence as evidence
 from test_swarm_config import swarm_board_count
 
 
+def timestamped(message, now=None):
+    """Print one compact, locally timestamped supervisor status line."""
+    when = time.localtime(time.time() if now is None else now)
+    print(f'{time.strftime("%H:%M:%S", when)} {message}', flush=True)
+
+
+def board_alias(name):
+    prefix = 'M' if name.startswith('miner6 ') else 'L'
+    try:
+        return f'{prefix}{int(name.rsplit("usb", 1)[1])}'
+    except (IndexError, ValueError):
+        return name
+
+
+def format_home_groups(groups, unknown=()):
+    def alias_key(value):
+        return (value[:1], int(value[1:])) if value[1:].isdigit() else (value, -1)
+
+    parts = []
+    for home, names in sorted(groups.items(),
+                              key=lambda item: (-len(item[1]), item[0])):
+        aliases = ','.join(sorted((board_alias(name) for name in names),
+                                  key=alias_key))
+        parts.append(f'{home}={aliases}')
+    if unknown:
+        parts.append('?=' + ','.join(sorted(board_alias(name) for name in unknown)))
+    return ' '.join(parts)
+
+
+def convergence_state(datasets, now, required, max_age,
+                      observation_floors=None):
+    """Return unanimous home, failure reason, and current usable home groups."""
+    observation_floors = observation_floors or {}
+    if len(datasets) != required:
+        return None, f'expected {required} logs, found {len(datasets)}', {}, []
+    groups = {}
+    unknown = []
+    first_reason = None
+    for name, data in datasets:
+        latest = (evidence.summarize(data)['latest'] or {})
+        home, observed = latest.get('home'), latest.get('host_time')
+        if not home or home == '-' or observed is None:
+            unknown.append(name)
+            first_reason = first_reason or f'{name} has no current home observation'
+            continue
+        if observed <= observation_floors.get(name, float('-inf')):
+            unknown.append(name)
+            first_reason = first_reason or f'{name} awaiting post-epoch home observation'
+            continue
+        age = now - observed
+        if age < -5 or age > max_age:
+            unknown.append(name)
+            first_reason = first_reason or f'{name} latest observation age {age:.1f}s'
+            continue
+        groups.setdefault(home, []).append(name)
+    if first_reason:
+        return None, first_reason, groups, unknown
+    if len(groups) != 1:
+        return None, f'{len(groups)} current homes', groups, unknown
+    return next(iter(groups)), None, groups, unknown
+
+
 def load_datasets(log_dir, remote_host, remote_dir, local_boards, remote_boards,
                   tail_bytes=1_000_000):
     datasets = []
@@ -43,24 +105,9 @@ def load_datasets(log_dir, remote_host, remote_dir, local_boards, remote_boards,
 
 def convergence_snapshot(datasets, now, required, max_age,
                          observation_floors=None):
-    observation_floors = observation_floors or {}
-    if len(datasets) != required:
-        return None, f'expected {required} logs, found {len(datasets)}'
-    homes = set()
-    for name, data in datasets:
-        latest = (evidence.summarize(data)['latest'] or {})
-        home, observed = latest.get('home'), latest.get('host_time')
-        if not home or home == '-' or observed is None:
-            return None, f'{name} has no current home observation'
-        if observed <= observation_floors.get(name, float('-inf')):
-            return None, f'{name} awaiting post-epoch home observation'
-        age = now - observed
-        if age < -5 or age > max_age:
-            return None, f'{name} latest observation age {age:.1f}s'
-        homes.add(home)
-    if len(homes) != 1:
-        return None, f'{len(homes)} current homes'
-    return next(iter(homes)), None
+    home, reason, _, _ = convergence_state(
+        datasets, now, required, max_age, observation_floors)
+    return home, reason
 
 
 def epoch_acknowledgments(datasets, request_time):
@@ -87,9 +134,9 @@ def issue_reset_requests(remote_host, local_boards, remote_boards, token, dry_ru
                     for i in remote_boards]
     if dry_run:
         for path in local_paths:
-            print(f'DRY-RUN reset request {path} id={token}', flush=True)
+            timestamped(f'DRY-RUN reset request {path} id={token}')
         for path in remote_paths:
-            print(f'DRY-RUN reset request {remote_host}:{path} id={token}', flush=True)
+            timestamped(f'DRY-RUN reset request {remote_host}:{path} id={token}')
         return
 
     def local():
@@ -147,9 +194,9 @@ def main():
     reset_token = None
     observation_floors = {}
     last_status = None
-    print(f'test-farm supervisor started boards={required} poll={args.poll_seconds:g}s '
-          f'sustain={args.sustain_seconds:g}s freshness={args.freshness_seconds:g}s',
-          flush=True)
+    timestamped(f'test-farm supervisor started boards={required} '
+                f'poll={args.poll_seconds:g}s sustain={args.sustain_seconds:g}s '
+                f'freshness={args.freshness_seconds:g}s')
     while True:
         now = time.time()
         datasets = load_datasets(args.log_dir, args.remote_host, args.remote_dir,
@@ -159,44 +206,44 @@ def main():
             missing = sorted(name for name, _ in datasets if name not in acknowledged)
             status = f'reset id={reset_token} acknowledged={len(acknowledged)}/{required}'
             if status != last_status:
-                print(status + (f' missing={",".join(missing)}' if missing else ''),
-                      flush=True)
+                timestamped(status + (f' missing={",".join(missing)}' if missing else ''))
                 last_status = status
             if len(acknowledged) == required:
-                print(f'reset id={reset_token} complete; monitoring new epoch', flush=True)
+                timestamped(f'reset id={reset_token} complete; monitoring new epoch')
                 observation_floors = acknowledged
                 reset_time = reset_token = None
                 candidate_home = candidate_since = None
                 last_status = None
             elif now - reset_time > args.ack_timeout_seconds:
-                print(f'reset id={reset_token} blocked after {now-reset_time:.0f}s; '
-                      f'missing={",".join(missing)}', flush=True)
+                timestamped(f'reset id={reset_token} blocked after {now-reset_time:.0f}s; '
+                            f'missing={",".join(missing)}')
             time.sleep(args.poll_seconds)
             continue
 
-        home, reason = convergence_snapshot(
+        home, reason, groups, unknown = convergence_state(
             datasets, now, required, args.freshness_seconds,
             observation_floors)
         if home is None:
-            if reason != last_status:
-                print(f'not converged: {reason}', flush=True)
-                last_status = reason
+            topology = format_home_groups(groups, unknown)
+            status = f'not converged: {reason}' + (f' | {topology}' if topology else '')
+            if status != last_status:
+                timestamped(status, now)
+                last_status = status
             candidate_home = candidate_since = None
         elif home != candidate_home:
             candidate_home, candidate_since = home, now
             last_status = None
-            print(f'convergence candidate home={home}; sustain timer started', flush=True)
+            timestamped(f'convergence candidate home={home}; sustain timer started', now)
         else:
             sustained = now - candidate_since
             status = f'converged home={home} sustained={sustained:.0f}s'
             if status != last_status:
-                print(status, flush=True)
+                timestamped(status, now)
                 last_status = status
             if sustained >= args.sustain_seconds:
                 reset_token = uuid.uuid4().hex
                 reset_time = time.time()
-                print(f'requesting coordinated cold reset id={reset_token} home={home}',
-                      flush=True)
+                timestamped(f'requesting coordinated cold reset id={reset_token} home={home}')
                 issue_reset_requests(args.remote_host, local_boards, remote_boards,
                                      reset_token, args.dry_run)
                 if args.dry_run:
