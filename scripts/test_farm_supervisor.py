@@ -65,11 +65,15 @@ def format_home_groups(groups, unknown=()):
 
 
 def foreign_present(datasets, now, max_age, mac=FOREIGN_MAC):
-    """Return whether recent association output mentions the foreign board."""
+    """Return whether recent received ESP-NOW evidence mentions the foreign board."""
     needle = mac.lower().replace(':', '')
     patterns = (
         f'association origin {needle}',
         f'matrix association device {needle}',
+        f'espnow summary origin {needle}',
+        f'@p o={needle}',
+        f'report-clock-rx sender {needle}',
+        f'@r s={needle}',
     )
     for _, data in datasets:
         for _, _, wall, body in evidence.records(data):
