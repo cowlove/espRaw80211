@@ -145,6 +145,15 @@ arguments to the same CSIM executable:
 ./scripts/run_csim.sh --seconds 18000 --reception-scale 0.60 > csim-5h.log
 ```
 
+Use `--random-seed N` for repeatable but distinct experiment trajectories.
+CSIM advances the deterministic seed across its internal deep-sleep process
+re-execs, so `rand()` does not restart from the same point after every wake:
+
+```sh
+./scripts/run_csim.sh --seconds 18000 --reception-scale 0.60 \
+  --random-seed 17 > seed-17.log
+```
+
 - Only one Wi-Fi channel is monitored.
 - A common beacon may not be physically visible to every board; a stable
   logical partition is then valid behavior.

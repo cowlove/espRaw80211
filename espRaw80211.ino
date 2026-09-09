@@ -1505,9 +1505,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 if (candidates[i] == selected && selected != home) eligible = true;
             if (!eligible) {
 #ifdef CSIM
-                const uint32_t randomValue = (uint32_t)CsimPairwiseModel::mix(
-                    deviceMac ^ ((uint64_t)wakeGeneration << 32) ^
-                    spiffsScoutCursor.read());
+                const uint32_t randomValue = (uint32_t)rand();
 #else
                 const uint32_t randomValue = esp_random();
 #endif
