@@ -37,6 +37,10 @@ def board_alias(name):
         return name
 
 
+def beacon_alias(bssid):
+    return f'{bssid[:2]}..{bssid[-4:]}' if len(bssid) > 8 else bssid
+
+
 def format_home_groups(groups, unknown=()):
     def alias_key(value):
         return (value[:1], int(value[1:])) if value[1:].isdigit() else (value, -1)
@@ -46,7 +50,7 @@ def format_home_groups(groups, unknown=()):
                               key=lambda item: (-len(item[1]), item[0])):
         aliases = ','.join(sorted((board_alias(name) for name in names),
                                   key=alias_key))
-        parts.append(f'{home}={aliases}')
+        parts.append(f'{beacon_alias(home)}={aliases}')
     if unknown:
         parts.append('?=' + ','.join(sorted(board_alias(name) for name in unknown)))
     return ' '.join(parts)
@@ -194,9 +198,8 @@ def main():
     reset_token = None
     observation_floors = {}
     last_status = None
-    timestamped(f'test-farm supervisor started boards={required} '
-                f'poll={args.poll_seconds:g}s sustain={args.sustain_seconds:g}s '
-                f'freshness={args.freshness_seconds:g}s')
+    timestamped(f'started boards={required} poll={args.poll_seconds:g}s '
+                f'sustain={args.sustain_seconds:g}s stale={args.freshness_seconds:g}s')
     while True:
         now = time.time()
         datasets = load_datasets(args.log_dir, args.remote_host, args.remote_dir,
@@ -224,6 +227,8 @@ def main():
             datasets, now, required, args.freshness_seconds,
             observation_floors)
         if home is None:
+            if reason.endswith(' current homes'):
+                reason = reason.replace(' current homes', ' homes')
             topology = format_home_groups(groups, unknown)
             status = f'not converged: {reason}' + (f' | {topology}' if topology else '')
             if status != last_status:

@@ -82,7 +82,7 @@ class InfrastructureTests(unittest.TestCase):
         }
         self.assertEqual(
             supervisor.format_home_groups(groups, ['local usb2', 'local usb1']),
-            '60a4b792da8a=L0,L3,M1 66a4b792e676=L4,M0 ?=L1,L2')
+            '60..da8a=L0,L3,M1 66..e676=L4,M0 ?=L1,L2')
 
     def test_supervisor_timestamp_is_compact(self):
         with patch.object(supervisor.time, 'localtime') as localtime, \
