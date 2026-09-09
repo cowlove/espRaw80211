@@ -240,9 +240,10 @@ def main():
             observation_floors)
         if home is None:
             if reason.endswith(' current homes'):
-                reason = reason.replace(' current homes', ' homes')
+                reason = 'NC' + reason.removesuffix(' current homes')
             topology = format_home_groups(groups, unknown)
-            status = f'not converged: {reason}' + (f' | {topology}' if topology else '')
+            status = (reason if reason.startswith('NC') else f'not converged: {reason}')
+            status += f' | {topology}' if topology else ''
             if status != last_status:
                 timestamped(status, now)
                 last_status = status
