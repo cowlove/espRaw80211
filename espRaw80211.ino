@@ -356,6 +356,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     SPIFFSVariable<int> spiffsTestConsensusMisses{"/testMisses", 0};
     SPIFFSVariable<int> spiffsTestResetCommitted{"/testResetCommit", 0};
     SPIFFSVariable<int> spiffsTestResetDelayCycles{"/testResetDelay", 0};
+    // Survives the simulated/hardware cold-epoch sleep so a deep-sleep wake
+    // does not re-enter the cold-start delay indefinitely.
+    SPIFFSVariable<int> spiffsColdEpochStarted{"/coldEpochStarted", 0};
     uint64_t targetBeacon = 0;
     int wifiChannel = 4;
     uint64_t startUsec = 0;
@@ -446,18 +449,23 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         clearRendezvousTestState();
     }
 
-    bool coldResetStartsTestEpoch() const {
-#if ARTIFICIAL_TEST_COLD_RESET_CLEARS_STATE && !defined(CSIM)
+    bool coldResetStartsTestEpoch() {
+#if ARTIFICIAL_TEST_COLD_RESET_CLEARS_STATE
+#ifdef CSIM
+        return spiffsColdEpochStarted.read() == 0;
+#else
         // ESP32's EN/power-domain reset is reported as POWERON_RESET (1).
         // Deep sleep is 5 and the distributed test reset uses deep sleep after
         // clearing state, so neither can recursively start another epoch.
         return resetReason() == 1;
+#endif
 #else
         return false;
 #endif
     }
 
     void beginColdResetTestEpoch() {
+        spiffsColdEpochStarted = 1;
         clearRendezvousTestState();
         const uint64_t minimum =
             (uint64_t)ARTIFICIAL_TEST_COLD_RESET_MIN_SLEEP_SECONDS * 1000000ULL;
