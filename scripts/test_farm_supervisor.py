@@ -271,7 +271,7 @@ def main():
             last_status = None
             elapsed = (f' since-reset={max(0, now-last_epoch_time):.0f}s'
                        if last_epoch_time is not None else '')
-            timestamped(f'convergence candidate home={home}; sustain timer started{elapsed}',
+            timestamped(f'candidate home={beacon_alias(home)}; sustain timer started{elapsed}',
                         now)
         else:
             sustained = now - candidate_since
