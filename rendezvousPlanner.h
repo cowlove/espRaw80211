@@ -157,6 +157,15 @@ inline uint64_t chooseScout(const uint64_t *eligible, size_t count,
     return next ? next : smallest;
 }
 
+// A probability in millionths makes the endpoint behavior exact without
+// floating-point differences between ESP32 and CSIM.  Callers deliberately
+// avoid consuming randomness at zero and one.
+inline bool includeScout(uint32_t randomValue, uint32_t probabilityMillionths) {
+    if (!probabilityMillionths) return false;
+    if (probabilityMillionths >= 1000000U) return true;
+    return randomValue % 1000000U < probabilityMillionths;
+}
+
 // Optional stateless weighted exploration. Every eligible non-home beacon
 // gets one ticket; a priority entry adds extraTickets more. Callers use the
 // fair rotating selector above when extraTickets is zero.

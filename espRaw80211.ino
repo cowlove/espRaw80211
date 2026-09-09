@@ -118,6 +118,7 @@ struct RemoteBeaconStats {
 static_assert(CONTEXT_COUNT == CsimPairwiseData::boardCount,
               "CSIM context count must match generated pairwise data");
 static uint64_t csimMaximumAwakeUsec = 0;
+static uint32_t csimSingletonScoutAggressivenessMillionths = 1000000;
 // Application-owned RF world. Each destination selects one environment, so
 // simulated devices can observe different BSSIDs and beacon clocks while the
 // capture HAL remains unaware of the RF model.
@@ -304,6 +305,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr uint64_t timingRecoverySleepUsec =
         defaultRendezvousUsec - beaconSamplingWindowUsec;
     static constexpr uint64_t maximumAwakeUsec = 120ULL * 1000000ULL;
+    // Singleton discovery may intentionally coalesce many scout windows, but
+    // beacon capture is only trusted from the beginning of a fresh wake.
+    static constexpr uint64_t singletonMaximumAwakeUsec = 60ULL * 1000000ULL;
+    static constexpr uint32_t singletonScoutAggressivenessMillionths = 1000000;
+    static constexpr size_t maximumPlanAppointments = 32;
 
     BeaconInfo packetLog[packetLogSize] = {};
     SPIFFSVariable<uint64_t> spiffsBeacon{"/beaconX", 0};
@@ -322,9 +328,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     SPIFFSVariable<uint32_t> spiffsTimingRecovery{"/timingRecovery", 0};
     SPIFFSVariable<int> spiffsStrongestRecovery{"/strongestRecovery", 0};
     RendezvousExecutor::RoundClock roundClock;
-    RendezvousPlanner::Plan<4> executionPlan{1000000};
-    RendezvousExecutor::Coverage coverage[4] = {};
-    uint16_t coverageSenderValid[4][16] = {};
+    RendezvousPlanner::Plan<maximumPlanAppointments> executionPlan{1000000};
+    RendezvousExecutor::Coverage coverage[maximumPlanAppointments] = {};
+    uint16_t coverageSenderValid[maximumPlanAppointments][16] = {};
     size_t executionInterval = 0;
     bool executionPlanned = false, exchangeActive = false;
     uint32_t exchangeSequence = 0;
@@ -332,7 +338,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint64_t plannedPeriod = 0;
     uint64_t nextPlanUsec = 0;
     uint32_t intervalRawStart = 0, intervalOkStart = 0, intervalFailStart = 0;
-    uint32_t coverageFailures[4] = {};
+    uint32_t coverageFailures[maximumPlanAppointments] = {};
     SPIFFSVariable<string> spiffsClaims{"/claims6", ""};
     SPIFFSVariable<string> spiffsAssociations{"/associations6", ""};
     SPIFFSVariable<string> spiffsOrigins{"/origins6", ""};
@@ -396,6 +402,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     bool scoutWake = false;
     bool scoutRendezvousWake = false;
     bool espNowStarted = false;
+    bool singletonAggressiveWake = false;
     uint64_t beaconReceivedAtUsec = 0;
 
     void executeTestReset(uint64_t homeBssid) {
@@ -1550,6 +1557,22 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         return nullptr;
     }
 
+    uint32_t randomScoutValue() const {
+#ifdef CSIM
+        return (uint32_t)rand();
+#else
+        return esp_random();
+#endif
+    }
+
+    uint32_t singletonScoutAggressiveness() const {
+#ifdef CSIM
+        return csimSingletonScoutAggressivenessMillionths;
+#else
+        return singletonScoutAggressivenessMillionths;
+#endif
+    }
+
     void dumpBeaconScanSummary() const {
         const uint64_t now = steadyMicros();
         for (const BeaconInfo &info : packetLog) {
@@ -1576,7 +1599,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         }
         const BeaconInfo *timing = observedTimingThisWake(home, now);
         if (!timing) return false; // recovery preserves home before strongest fallback
-        executionPlan = RendezvousPlanner::Plan<4>(1000000);
+        executionPlan = RendezvousPlanner::Plan<maximumPlanAppointments>(1000000);
         const uint64_t period = defaultRendezvousUsec;
         RendezvousPlanner::Appointment first, second, scout;
         if (!RendezvousPlanner::nextAppointment(home, timing->ts, timing->seen2,
@@ -1584,7 +1607,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             !RendezvousPlanner::nextAppointment(home, timing->ts, timing->seen2,
             first.end, period, beaconSamplingWindowUsec, exchangeWindowUsec, true, second) ||
             !executionPlan.addHome(first) || !executionPlan.addHome(second)) return false;
-        if (wakeGeneration - spiffsLastScoutRound.read() >= scoutIntervalWakes) {
+        const bool singletonHome = listenerCount(home) == 1;
+        const uint32_t singletonAggressiveness = singletonScoutAggressiveness();
+        if (singletonHome && singletonAggressiveness)
+            singletonAggressiveWake = true;
+        if ((singletonHome && singletonAggressiveness) ||
+            (!singletonHome &&
+             wakeGeneration - spiffsLastScoutRound.read() >= scoutIntervalWakes)) {
             uint64_t candidates[packetLogSize];
             uint64_t targetedCandidates[packetLogSize];
             size_t count = 0;
@@ -1599,12 +1628,42 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                         listenerCount(info.ssid) == 1)
                         targetedCandidates[targetedCount++] = info.ssid;
                 }
-            uint64_t selected = spiffsScoutBeacon.read();
-            bool eligible = false;
-            for (size_t i = 0; i < count; ++i)
-                if (candidates[i] == selected && selected != home) eligible = true;
-            if (!eligible) {
-                if (targetedScoutExtraTickets) {
+            if (singletonHome) {
+                size_t selectedCount = 0;
+                size_t plannedCount = 0;
+                size_t eligibleCount = 0;
+                for (size_t i = 0; i < count; ++i) {
+                    const uint64_t selected = candidates[i];
+                    if (!selected || selected == home) continue;
+                    ++eligibleCount;
+                    const bool selectedThisCycle =
+                        singletonAggressiveness >= 1000000U ||
+                        RendezvousPlanner::includeScout(randomScoutValue(),
+                                                        singletonAggressiveness);
+                    if (!selectedThisCycle) continue;
+                    ++selectedCount;
+                    const BeaconInfo *other = observedTimingThisWake(selected, now);
+                    if (!other || !RendezvousPlanner::nextAppointment(
+                            selected, other->ts, other->seen2, now, period,
+                            beaconSamplingWindowUsec, exchangeWindowUsec,
+                            false, scout))
+                        continue;
+                    if (executionPlan.addScout(scout, UINT64_MAX))
+                        ++plannedCount;
+                    else
+                        out("singleton-scout deferred capacity target %012llx",
+                            (unsigned long long)selected);
+                }
+                out("singleton-scout aggressiveness %u selected %u planned %u eligible %u",
+                    (unsigned)singletonAggressiveness,
+                    (unsigned)selectedCount, (unsigned)plannedCount,
+                    (unsigned)eligibleCount);
+            } else {
+                uint64_t selected = spiffsScoutBeacon.read();
+                bool eligible = false;
+                for (size_t i = 0; i < count; ++i)
+                    if (candidates[i] == selected && selected != home) eligible = true;
+                if (!eligible && targetedScoutExtraTickets) {
 #ifdef CSIM
                     const uint32_t randomValue = (uint32_t)rand();
 #else
@@ -1623,22 +1682,22 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                             (unsigned long long)selected,
                             selectedTargeted ? 1U : 0U,
                             (unsigned)targetedScoutExtraTickets);
-                } else {
+                } else if (!eligible) {
                     selected = RendezvousPlanner::chooseScout(candidates, count,
                         home, spiffsScoutCursor.read());
                 }
-            }
-            const BeaconInfo *other = observedTimingThisWake(selected, now);
-            if (other && RendezvousPlanner::nextAppointment(selected, other->ts,
-                other->seen2, now, period, beaconSamplingWindowUsec,
-                exchangeWindowUsec, false, scout)) {
-                if (executionPlan.addScout(scout, exchangeWindowUsec + 2000000))
-                    spiffsScoutBeacon = selected;
-                else {
-                    spiffsScoutCursor = selected;
-                    spiffsScoutBeacon = (uint64_t)0;
-                    spiffsLastScoutRound = wakeGeneration;
-                    out("scout deferred budget target %012llx", (unsigned long long)selected);
+                const BeaconInfo *other = observedTimingThisWake(selected, now);
+                if (other && RendezvousPlanner::nextAppointment(selected, other->ts,
+                    other->seen2, now, period, beaconSamplingWindowUsec,
+                    exchangeWindowUsec, false, scout)) {
+                    if (executionPlan.addScout(scout, exchangeWindowUsec + 2000000))
+                        spiffsScoutBeacon = selected;
+                    else {
+                        spiffsScoutCursor = selected;
+                        spiffsScoutBeacon = (uint64_t)0;
+                        spiffsLastScoutRound = wakeGeneration;
+                        out("scout deferred budget target %012llx", (unsigned long long)selected);
+                    }
                 }
             }
         }
@@ -1698,19 +1757,25 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         sleepForTimingRecovery(timingRecoverySleepUsec);
     }
 
-    void maximumAwakeRestart() {
-        out("maximum-awake restart after %.3f sec",
-            (steadyMicros() - startUsec) / 1000000.0);
+    void maximumAwakeSleep(uint64_t now, bool singletonLimit) {
+        static constexpr uint64_t refreshSleepUsec = 1000;
+        saveClaims(); saveAssociations(); saveOrigins();
+        spiffsRoundElapsed = roundClock.remainder + refreshSleepUsec;
+        spiffsSleepTime = refreshSleepUsec;
+        spiffsClaimGeneration = wakeGeneration;
+        out("maximum-awake deep sleep after %.3f sec limit %s",
+            (now - startUsec) / 1000000.0,
+            singletonLimit ? "singleton" : "general");
         dumpBeaconScanSummary();
         fflush(stdout);
-#ifdef CSIM
-        beaconCapture.stop();
-        esp_sleep_enable_timer_wakeup(1000);
-        esp_deep_sleep_start();
-#else
+#ifndef CSIM
         uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
-        esp_restart();
+#else
+        if (exchangeActive) CsimPairwiseModel::endWindow(deviceMac);
 #endif
+        beaconCapture.stop();
+        esp_sleep_enable_timer_wakeup(refreshSleepUsec);
+        esp_deep_sleep_start();
     }
 
     void sleepForExecutor(uint64_t duration) {
@@ -1737,12 +1802,16 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 
     void intervalExecutorLoop(uint64_t now) {
         advanceRoundClock(now);
-        uint64_t maximum = maximumAwakeUsec;
+        const bool singletonLimit = singletonAggressiveWake ||
+            (singletonScoutAggressiveness() &&
+             listenerCount(spiffsBeacon.read()) == 1);
+        uint64_t maximum = singletonLimit ? singletonMaximumAwakeUsec :
+                                            maximumAwakeUsec;
 #ifdef CSIM
         if (csimMaximumAwakeUsec) maximum = csimMaximumAwakeUsec;
 #endif
         if (now - startUsec >= maximum) {
-            maximumAwakeRestart();
+            maximumAwakeSleep(now, singletonLimit);
             return;
         }
         if (!spiffsIncarnation.read()) {
@@ -2235,23 +2304,39 @@ struct PairwiseModelInstaller : public Csim_Module {
     }
 
     void parseArg(char **&arg, char **end) override {
-        if (strcmp(*arg, "--reception-scale") != 0) return;
-        if (arg + 1 >= end) {
-            fprintf(stderr, "--reception-scale requires a nonnegative number\n");
-            exit(2);
+        if (strcmp(*arg, "--reception-scale") == 0) {
+            if (arg + 1 >= end) {
+                fprintf(stderr, "--reception-scale requires a nonnegative number\n");
+                exit(2);
+            }
+            char *tail = nullptr;
+            const float value = strtof(*(++arg), &tail);
+            if (!tail || *tail || !isfinite(value) || value < 0) {
+                fprintf(stderr, "invalid --reception-scale value\n");
+                exit(2);
+            }
+            CsimPairwiseModel::receptionScale = value;
+        } else if (strcmp(*arg, "--singleton-scout-aggressiveness") == 0) {
+            if (arg + 1 >= end) {
+                fprintf(stderr, "--singleton-scout-aggressiveness requires 0..1\n");
+                exit(2);
+            }
+            char *tail = nullptr;
+            const double value = strtod(*(++arg), &tail);
+            if (!tail || *tail || !isfinite(value) || value < 0 || value > 1) {
+                fprintf(stderr, "invalid --singleton-scout-aggressiveness value\n");
+                exit(2);
+            }
+            csimSingletonScoutAggressivenessMillionths =
+                (uint32_t)(value * 1000000.0 + 0.5);
         }
-        char *tail = nullptr;
-        const float value = strtof(*(++arg), &tail);
-        if (!tail || *tail || !isfinite(value) || value < 0) {
-            fprintf(stderr, "invalid --reception-scale value\n");
-            exit(2);
-        }
-        CsimPairwiseModel::receptionScale = value;
     }
 
     void setup() override {
         printf("csim reception-scale %.6g\n",
                CsimPairwiseModel::receptionScale);
+        printf("csim singleton-scout-aggressiveness %.6f\n",
+               csimSingletonScoutAggressivenessMillionths / 1000000.0);
     }
 };
 static PairwiseModelInstaller pairwiseModelInstaller;

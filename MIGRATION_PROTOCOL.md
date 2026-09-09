@@ -112,7 +112,8 @@ schedule a scout. A candidate currently needs:
 - nonzero BSSID;
 - RSSI of at least -85 dBm;
 - at least three captured beacon packets; and
-- fresh timing that can be projected into an appointment.
+- timing observed during the current wake that can be projected into an
+  appointment.
 
 These observations decide **where and when it is possible to scout**. Beacon
 RSSI and packet count do not authorize a home change.
@@ -143,6 +144,24 @@ awake-time budget and does not displace the home appointment.
 Scouting is considered every two logical rounds. Eligible non-home beacons are
 visited in a fair rotating sequence. Overlapping or nearby radio windows may
 be merged into one awake interval.
+
+Singletons use a separate aggressive-discovery policy. Each eligible non-home
+beacon is independently selected with probability
+`singletonScoutAggressivenessMillionths / 1000000`; the hardware default is
+1.0, so a singleton adds the next appointment for every eligible beacon. The
+planner sorts these appointments and coalesces overlapping or nearby windows.
+This can intentionally produce nearly continuous exchange activity with the
+30-second test period, while naturally leaving sleep gaps with longer
+production periods. To prevent observations from spanning an indefinitely
+long radio session, an aggressive singleton always deep-sleeps and starts a
+fresh beacon-only acquisition wake after at most 60 seconds. ESP-NOW is not
+stopped and restarted inside a wake.
+
+CSIM accepts `--singleton-scout-aggressiveness 0..1` for controlled sweeps.
+Zero disables optional singleton scouts; intermediate values select a random
+subset each plan; one selects every eligible non-home beacon. Established
+groups retain the every-two-round, one-target fair rotation and its existing
+awake-time budget.
 
 The implementation retains an optional weighted targeting experiment:
 `targetedScoutExtraTickets` gives fresh, locally visible rumored-singleton

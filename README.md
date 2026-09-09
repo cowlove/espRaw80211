@@ -154,6 +154,14 @@ re-execs, so `rand()` does not restart from the same point after every wake:
   --random-seed 17 > seed-17.log
 ```
 
+Use `--singleton-scout-aggressiveness P`, where `P` is from 0 through 1, to
+control the independent probability that a singleton includes each eligible
+non-home beacon in its plan. The default 1 visits all eligible candidates;
+zero disables singleton scouts. Established groups retain their conservative
+one-target fair rotation. Aggressive singleton wakes are forced through deep
+sleep after at most 60 seconds so the next wake starts with clean beacon-only
+acquisition.
+
 For migration-policy experiments, stop at the first global convergence so the
 10/10 qualification and reset delay do not dominate the metric:
 

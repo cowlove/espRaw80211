@@ -60,6 +60,14 @@ int main() {
     assert(adjacent.addHome({10,20,1}));
     assert(adjacent.addHome({20,30,1}));
     assert(adjacent.intervalCount()==1); // touching windows need no sleep
+    Plan<16> aggressive(1);
+    assert(aggressive.addHome({10,15,1}));
+    assert(aggressive.addHome({40,45,1}));
+    for(uint64_t i=0;i<8;++i)
+        assert(aggressive.addScout({12+i*4,17+i*4,10+i},UINT64_MAX));
+    assert(aggressive.appointmentCount()==10);
+    assert(aggressive.intervalCount()==1);
+    assert(aggressive.interval(0).start==10 && aggressive.interval(0).end==45);
     Plan<2> overflow(UINT64_MAX);
     assert(overflow.addHome({0,1,1}));
     assert(overflow.addHome({UINT64_MAX-1,UINT64_MAX,1}));
@@ -72,6 +80,13 @@ int main() {
     assert(chooseScout(candidates,6,20,40)==10);
     assert(chooseScout(candidates,6,20,25)==30); // removed previous candidate
     assert(chooseScout(nullptr,0,20,0)==0);
+    assert(!includeScout(0,0));
+    assert(!includeScout(999999,0));
+    assert(includeScout(0,1));
+    assert(!includeScout(1,1));
+    assert(includeScout(499999,500000));
+    assert(!includeScout(500000,500000));
+    assert(includeScout(UINT32_MAX,1000000));
     uint64_t priority[]={40};
     // Eligible tickets are 30,10,40, with two additional tickets for 40.
     assert(chooseWeightedScout(candidates,6,priority,1,20,0,2)==30);
