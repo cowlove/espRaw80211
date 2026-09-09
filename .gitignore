@@ -1,4 +1,5 @@
 *.out
+test-farm-supervisor.log
 logs/archive/
 build/
 csim-fs/

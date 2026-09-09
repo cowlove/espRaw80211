@@ -22,11 +22,18 @@ import analyze_rendezvous as analyzer
 import rendezvous_evidence as evidence
 from test_swarm_config import swarm_board_count
 
+DEFAULT_STATUS_LOG = Path(__file__).resolve().parents[1] / 'test-farm-supervisor.log'
+status_log = None
+
 
 def timestamped(message, now=None):
     """Print one compact, locally timestamped supervisor status line."""
     when = time.localtime(time.time() if now is None else now)
-    print(f'{time.strftime("%H:%M:%S", when)} {message}', flush=True)
+    line = f'{time.strftime("%H:%M:%S", when)} {message}'
+    print(line, flush=True)
+    if status_log is not None:
+        with status_log.open('a', encoding='utf-8') as output:
+            output.write(line + '\n')
 
 
 def board_alias(name):
@@ -164,6 +171,7 @@ def issue_reset_requests(remote_host, local_boards, remote_boards, token, dry_ru
 
 
 def main():
+    global status_log
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--log-dir', type=Path,
                         default=Path(__file__).resolve().parents[1])
@@ -175,8 +183,12 @@ def main():
     parser.add_argument('--ack-timeout-seconds', type=float, default=180)
     parser.add_argument('--local-boards', default='0,1,2,3,4')
     parser.add_argument('--remote-boards', default='0,1')
+    parser.add_argument('--log-file', type=Path, default=DEFAULT_STATUS_LOG,
+                        help=f'append status lines here (default: {DEFAULT_STATUS_LOG})')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
+    status_log = args.log_file
+    status_log.parent.mkdir(parents=True, exist_ok=True)
     if min(args.poll_seconds, args.freshness_seconds,
            args.ack_timeout_seconds) <= 0 or args.sustain_seconds < 0:
         parser.error('durations must be positive (sustain may be zero)')

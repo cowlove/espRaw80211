@@ -85,12 +85,19 @@ class InfrastructureTests(unittest.TestCase):
             '60..da8a=L0,L3,M1 66..e676=L4,M0 ?=L1,L2')
 
     def test_supervisor_timestamp_is_compact(self):
-        with patch.object(supervisor.time, 'localtime') as localtime, \
-             patch('builtins.print') as output:
-            localtime.return_value = supervisor.time.struct_time(
-                (2026, 9, 9, 7, 8, 9, 2, 252, -1))
-            supervisor.timestamped('not converged', 123)
-        output.assert_called_once_with('07:08:09 not converged', flush=True)
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / 'supervisor.log'
+            with patch.object(supervisor.time, 'localtime') as localtime, \
+                 patch.object(supervisor, 'status_log', logfile), \
+                 patch('builtins.print') as output:
+                localtime.return_value = supervisor.time.struct_time(
+                    (2026, 9, 9, 7, 8, 9, 2, 252, -1))
+                supervisor.timestamped('not converged', 123)
+                supervisor.timestamped('converged', 124)
+            output.assert_any_call('07:08:09 not converged', flush=True)
+            self.assertEqual(logfile.read_text().splitlines(),
+                             ['07:08:09 not converged', '07:08:09 converged'])
 
     def test_prefixed_cycle_matches_legacy(self):
         lines = ['00005.0 ESP-NOW exchange phase started',
