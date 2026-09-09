@@ -260,6 +260,61 @@ def global_home_convergences(datasets, required: int, max_skew: float = 90):
     return events
 
 
+def reset_recovery_events(datasets, required: int, max_skew: float = 90):
+    """Pair reset waves with the next observed all-board home consensus.
+
+    Reset waves are grouped by host receipt time because each board executes
+    its deliberate reset independently.  The consensus endpoint is the next
+    observational same-home event, not the later 10/10 qualification.
+    """
+    reset_rows = []
+    for name, data in datasets:
+        for _, _, wall, body in evidence.records(data):
+            if wall is not None and 'TEST RESET EXECUTED' in body:
+                reset_rows.append((wall, name))
+    reset_rows.sort()
+    waves = []
+    for wall, name in reset_rows:
+        if not waves or wall - waves[-1]['last'] > max_skew:
+            waves.append({'first': wall, 'last': wall, 'boards': {name}})
+        else:
+            waves[-1]['last'] = wall
+            waves[-1]['boards'].add(name)
+    consensus = global_home_convergences(datasets, required, max_skew)
+    results = []
+    for wave in waves:
+        following = [event for event in consensus if event['host_time'] >= wave['last']]
+        event = following[0] if following else None
+        results.append({
+            'reset_time': wave['first'],
+            'reset_end': wave['last'],
+            'boards': sorted(wave['boards']),
+            'consensus_time': event['host_time'] if event else None,
+            'bssid': event['bssid'] if event else None,
+            'latency': (event['host_time'] - wave['first']) if event else None,
+        })
+    return results
+
+
+def print_reset_recovery(datasets, required: int) -> None:
+    print('Reset-wave recovery | reset execution → next emerging consensus')
+    results = reset_recovery_events(datasets, required)
+    if not results:
+        print('  no TEST RESET EXECUTED records in selected logs')
+        return
+    completed = [row for row in results if row['latency'] is not None]
+    for row in results:
+        reset = datetime.fromtimestamp(row['reset_time']).astimezone().isoformat(timespec='seconds')
+        if row['latency'] is None:
+            print(f"  {reset} boards={len(row['boards'])} consensus=none-in-selected-logs")
+        else:
+            consensus = datetime.fromtimestamp(row['consensus_time']).astimezone().isoformat(timespec='seconds')
+            print(f"  {reset} boards={len(row['boards'])} latency={row['latency']:.1f}s consensus={consensus} home={row['bssid']}")
+    if completed:
+        values = [row['latency'] for row in completed]
+        print(f"  summary completed={len(completed)}/{len(results)} median={statistics.median(values):.1f}s min={min(values):.1f}s max={max(values):.1f}s")
+
+
 def current_home_distribution(datasets, summaries=None):
     """Group each logged board's latest observed home by BSSID.
 
@@ -684,6 +739,7 @@ def main() -> int:
     ap.add_argument("--tail-bytes", type=int, default=DEFAULT_TAIL_BYTES,
                     help="maximum suffix read per log; 0 or -1 reads the full file (default: 1000000)")
     ap.add_argument("--convergence", action="store_true", help="show cycles from reset execution to next 10/10 consensus")
+    ap.add_argument("--reset-recovery", action="store_true", help="measure reset-wave execution to next emerging same-home consensus")
     ap.add_argument("--session", default="latest", help="latest (default), all, or an exact logger session ID")
     ap.add_argument("--since", help="inclusive ISO host timestamp with timezone")
     ap.add_argument("--until", help="inclusive ISO host timestamp with timezone")
@@ -793,8 +849,12 @@ def main() -> int:
             for note in caveats:
                 print('Note: ' + note)
         return 0
-    if args.convergence:
+    if args.convergence or args.reset_recovery:
         print_current_home_distribution(datasets)
+        if args.reset_recovery:
+            print_reset_recovery(datasets, swarm_board_count())
+        if not args.convergence:
+            return 0
         print("Convergence dashboard | KPI = complete wake/sleep cycles after flush until 10/10 consensus")
         all_cycles = []
         for name, data in datasets:

@@ -35,6 +35,19 @@ class AnalyzerTailTests(unittest.TestCase):
             analyzer.read_remote('host', '~/log', 123)
             self.assertIn('tail -c 123', run.call_args.args[0][-1])
 
+    def test_reset_recovery_groups_reset_wave_and_pairs_consensus(self):
+        log_a = b'2026-09-09T08:00:00+00:00 host_mono_ns=1 board=a port=p session=s | TEST RESET EXECUTED\n'
+        log_b = b'2026-09-09T08:00:20+00:00 host_mono_ns=2 board=b port=p session=s | TEST RESET EXECUTED\n'
+        with patch.object(analyzer, 'global_home_convergences', return_value=[
+                {'host_time': analyzer.evidence.timestamp('2026-09-09T08:01:00+00:00'),
+                 'bssid': 'deadbeef'}]):
+            rows = analyzer.reset_recovery_events(
+                [('a', log_a), ('b', log_b)], required=2)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['boards'], ['a', 'b'])
+        self.assertEqual(rows[0]['bssid'], 'deadbeef')
+        self.assertEqual(rows[0]['latency'], 60.0)
+
 
 if __name__ == '__main__':
     unittest.main()
