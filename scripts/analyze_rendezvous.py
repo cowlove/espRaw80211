@@ -281,14 +281,37 @@ def reset_recovery_events(datasets, required: int, max_skew: float = 90):
             waves[-1]['last'] = wall
             waves[-1]['boards'].add(name)
     consensus = global_home_convergences(datasets, required, max_skew)
+    observations = []
+    board_names = {name for name, _ in datasets}
+    for name, data in datasets:
+        for cycle in evidence.parse_evidence(data)[0]:
+            if cycle.wall is not None and cycle.home:
+                observations.append((cycle.wall, name, cycle.home))
+    observations.sort()
     results = []
     for wave in waves:
-        following = [event for event in consensus if event['host_time'] >= wave['last']]
+        # An old common home may still be visible after only one board resets.
+        # Require a complete post-wave snapshot that actually fragments before
+        # accepting a later same-home event as recovery.
+        latest = {}
+        fragmented_at = None
+        for wall, name, home in observations:
+            if wall < wave['last']:
+                continue
+            latest[name] = (wall, home)
+            if (len(latest) == len(board_names) and
+                    len({value[1] for value in latest.values()}) > 1):
+                fragmented_at = wall
+                break
+        following = [event for event in consensus
+                     if fragmented_at is not None and
+                     event['host_time'] >= fragmented_at]
         event = following[0] if following else None
         results.append({
             'reset_time': wave['first'],
             'reset_end': wave['last'],
             'boards': sorted(wave['boards']),
+            'fragmented_time': fragmented_at,
             'consensus_time': event['host_time'] if event else None,
             'bssid': event['bssid'] if event else None,
             'latency': (event['host_time'] - wave['first']) if event else None,
@@ -305,11 +328,15 @@ def print_reset_recovery(datasets, required: int) -> None:
     completed = [row for row in results if row['latency'] is not None]
     for row in results:
         reset = datetime.fromtimestamp(row['reset_time']).astimezone().isoformat(timespec='seconds')
-        if row['latency'] is None:
-            print(f"  {reset} boards={len(row['boards'])} consensus=none-in-selected-logs")
+        if row['fragmented_time'] is None:
+            print(f"  {reset} boards={len(row['boards'])} fragmented=not-observed")
+        elif row['latency'] is None:
+            fragmented = datetime.fromtimestamp(row['fragmented_time']).astimezone().isoformat(timespec='seconds')
+            print(f"  {reset} boards={len(row['boards'])} fragmented={fragmented} consensus=none-after-fragmentation")
         else:
+            fragmented = datetime.fromtimestamp(row['fragmented_time']).astimezone().isoformat(timespec='seconds')
             consensus = datetime.fromtimestamp(row['consensus_time']).astimezone().isoformat(timespec='seconds')
-            print(f"  {reset} boards={len(row['boards'])} latency={row['latency']:.1f}s consensus={consensus} home={row['bssid']}")
+            print(f"  {reset} boards={len(row['boards'])} fragmented={fragmented} latency={row['latency']:.1f}s consensus={consensus} home={row['bssid']}")
     if completed:
         values = [row['latency'] for row in completed]
         print(f"  summary completed={len(completed)}/{len(results)} median={statistics.median(values):.1f}s min={min(values):.1f}s max={max(values):.1f}s")

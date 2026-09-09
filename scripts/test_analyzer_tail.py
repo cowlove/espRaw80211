@@ -3,6 +3,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -38,9 +39,12 @@ class AnalyzerTailTests(unittest.TestCase):
     def test_reset_recovery_groups_reset_wave_and_pairs_consensus(self):
         log_a = b'2026-09-09T08:00:00+00:00 host_mono_ns=1 board=a port=p session=s | TEST RESET EXECUTED\n'
         log_b = b'2026-09-09T08:00:20+00:00 host_mono_ns=2 board=b port=p session=s | TEST RESET EXECUTED\n'
+        cycles = [SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:00:30+00:00'), home='aaaa'),
+                  SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:00:31+00:00'), home='bbbb')]
         with patch.object(analyzer, 'global_home_convergences', return_value=[
                 {'host_time': analyzer.evidence.timestamp('2026-09-09T08:01:00+00:00'),
-                 'bssid': 'deadbeef'}]):
+                 'bssid': 'deadbeef'}]), \
+             patch.object(analyzer.evidence, 'parse_evidence', side_effect=[(cycles[:1], 0), (cycles[1:], 0)]):
             rows = analyzer.reset_recovery_events(
                 [('a', log_a), ('b', log_b)], required=2)
         self.assertEqual(len(rows), 1)
