@@ -51,7 +51,7 @@ class AnalyzerTailTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['bssid'], 'deadbeef')
         self.assertEqual(rows[0]['minimum_size'], 1)
-        self.assertEqual(rows[0]['latency'], 0.0)
+        self.assertEqual(rows[0]['latency'], 29.0)
 
 
 if __name__ == '__main__':

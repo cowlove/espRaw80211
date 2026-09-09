@@ -284,6 +284,7 @@ def reset_recovery_events(datasets, required: int, max_skew: float = 90):
     reset_times = [wall for wall, _ in reset_rows]
     latest = {}
     minimum = None
+    minimum_start = None
     minimum_end = None
     results = []
     for wall, name, home in observations:
@@ -297,17 +298,19 @@ def reset_recovery_events(datasets, required: int, max_skew: float = 90):
         if largest == len(board_names) and minimum is not None and minimum < 5:
             if not any(minimum_end < reset <= wall for reset in reset_times):
                 results.append({
-                    'minimum_time': minimum_end,
+                    'minimum_time': minimum_start,
                     'minimum_size': minimum,
                     'consensus_time': wall,
                     'bssid': max(counts, key=counts.get),
-                    'latency': wall - minimum_end,
+                    'latency': wall - minimum_start,
                 })
             minimum = None
+            minimum_start = None
             minimum_end = None
         elif largest < 5:
             if minimum is None or largest < minimum:
                 minimum = largest
+                minimum_start = wall
                 minimum_end = wall
             elif largest == minimum:
                 minimum_end = wall
@@ -325,7 +328,7 @@ def print_reset_recovery(datasets, required: int) -> None:
     for row in results:
         minimum = datetime.fromtimestamp(row['minimum_time']).astimezone().isoformat(timespec='seconds')
         consensus = datetime.fromtimestamp(row['consensus_time']).astimezone().isoformat(timespec='seconds')
-        print(f"  minimum-end={minimum} minimum-group={row['minimum_size']} consensus={consensus} latency={row['latency']:.1f}s home={row['bssid']}")
+        print(f"  minimum-start={minimum} minimum-group={row['minimum_size']} consensus={consensus} latency={row['latency']:.1f}s home={row['bssid']}")
     if completed:
         values = [row['latency'] for row in completed]
         print(f"  summary completed={len(completed)}/{len(results)} median={statistics.median(values):.1f}s min={min(values):.1f}s max={max(values):.1f}s")
