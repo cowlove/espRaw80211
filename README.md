@@ -94,7 +94,11 @@ This builds once, terminates matching `*.usbN` screen sessions, uploads each
 selected `/dev/ttyUSB<N>`, and creates fresh detached screen sessions whose
 append-mode logger starts only after a successful upload. Use `--boards 0,1,2,3`
 to select explicit ports and `--erase-flash` for a destructive clean start.
-Uploads run synchronously, one board at a time; failures stop deployment.
+Uploads run in parallel after one shared build, with one worker per selected
+board by default. Each board is independently hash-verified and gets a fresh
+logger only after its successful upload. Use `--jobs 1` for sequential
+troubleshooting or `--jobs N` to bound USB/CPU concurrency. Any failures are
+collected and reported after the other in-flight uploads finish.
 The unsupported `--keep-screens` option has been removed. Logs append
 to `cat.usbN.out`; each line is prefixed by `scripts/timestamp_serial.py` with
 host wall time, monotonic nanoseconds, board, port, and logger session ID while

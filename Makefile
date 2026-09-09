@@ -14,9 +14,16 @@ BUILD_EXTRA_FLAGS += -DGIT_VERSION=\"$(GIT_VERSION)\"
 BUILD_EXTRA_FLAGS += -DESP32CORE_V2
 include ${HOME}/Arduino/libraries/makeEspArduino/makeEspArduino.mk
 
-.PHONY: hardware-upload fixtty cat uc
+.PHONY: hardware-upload upload-only fixtty cat uc
 
 hardware-upload: upload
+
+# The deployment helper builds once before launching concurrent board uploads.
+# This target only reads the completed artifacts, avoiding parallel make jobs
+# racing while producing the shared build outputs.
+upload-only:
+	$(CHECK_PORT)
+	$(UPLOAD_COM)
 
 fixtty:
 	stty -F ${UPLOAD_PORT} -hupcl -crtscts -echo raw 115200

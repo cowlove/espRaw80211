@@ -36,6 +36,23 @@ class InfrastructureTests(unittest.TestCase):
             deploy.start_screen(deploy.UsbSession('123.esp.usb1', 1), 'logger', False)
             self.assertEqual(run.call_args.args[0][2], 'esp.usb1')
 
+    def test_upload_uses_prebuilt_artifacts(self):
+        with patch.object(deploy.subprocess, 'run') as run, \
+             patch.object(deploy, 'start_logger'):
+            deploy.deploy(deploy.UsbSession('esp.usb2', 2), Path('/project'),
+                          False, False, Path('/tools/esptool'))
+            command = run.call_args.args[0]
+            self.assertIn('upload-only', command)
+            self.assertNotIn('upload', command)
+
+    def test_parallel_deploy_visits_every_board(self):
+        sessions = [deploy.UsbSession(f'esp.usb{i}', i) for i in range(3)]
+        with patch.object(deploy, 'deploy') as upload:
+            deploy.deploy_parallel(sessions, Path('/project'), False, False,
+                                   Path('/tools/esptool'), 2)
+        self.assertEqual({call.args[0].index for call in upload.call_args_list},
+                         {0, 1, 2})
+
 
 if __name__ == '__main__':
     unittest.main()

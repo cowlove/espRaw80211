@@ -9,6 +9,7 @@ on a healthy foreground shell or a manually started logger.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import os
 import re
 import shlex
@@ -118,7 +119,7 @@ def deploy(
         commands.append(shlex.split(esptool_command(esptool)) +
                         ['--chip', 'esp32', '--port', session.port, 'erase_flash'])
     commands.append(['make', '-C', str(project), 'BOARD=esp32',
-                     f'UPLOAD_PORT={session.port}', 'upload'])
+                     f'UPLOAD_PORT={session.port}', 'upload-only'])
     # Flash synchronously: detached-screen success is not upload success.
     for command in commands:
         print('$', shlex.join(command))
@@ -173,7 +174,40 @@ def build_firmware(project: Path, dry_run: bool) -> None:
     env = os.environ.copy()
     env["PATH"] = tool_path()
     subprocess.run(command, check=True, env=env)
-    print("ESP32 firmware build completed; starting sequential uploads.")
+    print("ESP32 firmware build completed; starting uploads.")
+
+
+def deploy_parallel(
+    sessions: list[UsbSession],
+    project: Path,
+    dry_run: bool,
+    erase_flash: bool,
+    esptool: Path,
+    jobs: int,
+) -> None:
+    """Upload independently in parallel, then report every board failure."""
+    if dry_run or jobs == 1:
+        for session in sessions:
+            deploy(session, project, dry_run, erase_flash, esptool)
+        return
+
+    failures: list[tuple[UsbSession, Exception]] = []
+    print(f"Uploading {len(sessions)} boards with {jobs} parallel workers...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = {
+            executor.submit(deploy, session, project, False, erase_flash, esptool): session
+            for session in sessions
+        }
+        for future in concurrent.futures.as_completed(futures):
+            session = futures[future]
+            try:
+                future.result()
+            except Exception as exc:
+                failures.append((session, exc))
+                print(f"{session.name}: deployment failed: {exc}", file=sys.stderr)
+    if failures:
+        names = ", ".join(session.name for session, _ in failures)
+        raise RuntimeError(f"Deployment failed for: {names}")
 
 
 def main() -> int:
@@ -205,10 +239,19 @@ def main() -> int:
         metavar="N[,N...]",
         help="USB board indices; default is every detected /dev/ttyUSBN",
     )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=0,
+        metavar="N",
+        help="parallel upload workers; default is one per selected board, use 1 for sequential",
+    )
     parser.add_argument('--log-only', action='store_true', help='restart loggers without building or flashing')
     args = parser.parse_args()
     if args.log_only and args.erase_flash:
         parser.error('--log-only cannot be combined with --erase-flash')
+    if args.jobs < 0:
+        parser.error('--jobs must be zero or a positive integer')
 
     indices = args.boards if args.boards is not None else discover_indices()
     if not indices:
@@ -244,14 +287,10 @@ def main() -> int:
                 time.sleep(0.1)
         if args.log_only:
             start_logger(session, args.project.resolve(), args.dry_run)
-            continue
-        deploy(
-            session,
-            args.project.resolve(),
-            args.dry_run,
-            args.erase_flash,
-            esptool,
-        )
+    if not args.log_only:
+        jobs = min(args.jobs or len(sessions), len(sessions))
+        deploy_parallel(sessions, args.project.resolve(), args.dry_run,
+                        args.erase_flash, esptool, jobs)
     return 0
 
 
