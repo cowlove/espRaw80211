@@ -317,6 +317,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     RendezvousExecutor::RoundClock roundClock;
     RendezvousPlanner::Plan<4> executionPlan{1000000};
     RendezvousExecutor::Coverage coverage[4] = {};
+    uint16_t coverageSenderValid[4][16] = {};
     size_t executionInterval = 0;
     bool executionPlanned = false, exchangeActive = false;
     uint32_t exchangeSequence = 0;
@@ -1354,6 +1355,37 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         return packets;
     }
 
+    bool eligibleMigrationTarget(uint64_t bssid, uint64_t now) const {
+        for (const BeaconInfo &info : packetLog)
+            if (info.ssid == bssid && info.rssi >= reportMinRssi &&
+                info.count >= minimumCandidatePackets)
+                return freshTiming(bssid, now) != nullptr;
+        return false;
+    }
+
+    uint64_t singletonVisitorInvitation(size_t appointment, uint64_t homeBssid,
+                                        uint64_t now) const {
+        if (appointment >= 4 || listenerCount(homeBssid) != 1) return 0;
+        uint64_t best = 0;
+        size_t bestMembers = 0;
+        for (uint8_t i = 0; i < reportSenderCount; ++i) {
+            if (reportSenderValid[i] <= coverageSenderValid[appointment][i])
+                continue;
+            const uint64_t target = reportSenderSelectedBeacon[i];
+            if (!target || target == homeBssid ||
+                !eligibleMigrationTarget(target, now))
+                continue;
+            const size_t members = listenerCount(target);
+            if (members < 2) continue;
+            if (members > bestMembers ||
+                (members == bestMembers && (!best || target < best))) {
+                best = target;
+                bestMembers = members;
+            }
+        }
+        return best;
+    }
+
     void advanceRoundClock(uint64_t now) {
         const uint64_t elapsed = roundClock.tick(now, defaultRendezvousUsec);
         if (!elapsed) return;
@@ -1403,6 +1435,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         memset(reportSenderBadVersion, 0, sizeof(reportSenderBadVersion));
         memset(reportSenderAssociationRefresh, 0, sizeof(reportSenderAssociationRefresh));
         memset(reportSenderSelectedBeacon, 0, sizeof(reportSenderSelectedBeacon));
+        memset(coverageSenderValid, 0, sizeof(coverageSenderValid));
         memset(reportSenderClaimEntries, 0, sizeof(reportSenderClaimEntries));
         memset(reportSenderRadioMismatch, 0, sizeof(reportSenderRadioMismatch));
         reportSenderCount = 0;
@@ -1623,6 +1656,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             if (!state.started && now >= a.start) {
                 state.begin(now, a.start, a.late, privMux.getSendSuccesses(), reportValidRxCount, 20000);
                 coverageFailures[i] = privMux.getSendFailures();
+                memcpy(coverageSenderValid[i], reportSenderValid,
+                       sizeof(coverageSenderValid[i]));
             }
             if (state.started && !state.finished && now >= a.end) {
                 state.finished = true;
@@ -1635,7 +1670,20 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                     updateHomeCredibility(a.bssid, healthy, state.full);
                     if (healthy && state.full)
                         maybeCommitMigration(a.bssid);
-                    if (healthy && state.full) {
+                    if (spiffsBeacon.read() == a.bssid) {
+                        const uint64_t invitation =
+                            singletonVisitorInvitation(i, a.bssid, now);
+                        if (invitation) {
+                            out("singleton-join visitor target %012llx members %u from %012llx full %u",
+                                (unsigned long long)invitation,
+                                (unsigned)listenerCount(invitation),
+                                (unsigned long long)a.bssid,
+                                state.full ? 1U : 0U);
+                            commitHome(invitation);
+                        }
+                    }
+                    if (healthy && state.full &&
+                        spiffsBeacon.read() == a.bssid) {
                         spiffsRoundHealthy = 1;
                         spiffsRoundHome = a.bssid;
                     }

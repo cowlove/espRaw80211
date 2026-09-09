@@ -17,7 +17,8 @@ The protocol tries to coalesce independently starting boards onto one beacon
 without allowing incomplete or stale gossip to fragment an established group.
 Its main invariants are:
 
-- A singleton may quickly join a directly observed group.
+- A singleton may quickly join a directly observed group, either by scouting it
+  or by hearing one of its members visit the singleton's home.
 - An established member may move only toward a group believed to be strictly
   larger than its current group.
 - Claim gossip alone must not move an established member.
@@ -116,10 +117,12 @@ schedule a scout. A candidate currently needs:
 These observations decide **where and when it is possible to scout**. Beacon
 RSSI and packet count do not authorize a home change.
 
-### 2. Direct ESP-NOW reports during a scout
+### 2. Direct ESP-NOW reports during an appointment
 
 A valid report identifies its physical sender and the sender's selected beacon.
-This is the positive trigger for evaluating the scout target.
+During a scout this triggers evaluation of the scout target. During a
+singleton's home appointment, a visiting scout advertising another home can
+trigger reverse-discovery evaluation.
 
 ### 3. Fresh association table
 
@@ -188,6 +191,24 @@ applies.
 
 The rule intentionally does not allow singleton-to-singleton movement. Such a
 move would not improve coalescence and could create oscillation.
+
+### Visitor invitations at a singleton's home
+
+A singleton need not personally scout the larger group. A member of that group
+may scout the singleton's home while continuing to advertise its real selected
+beacon. The singleton evaluates only packets received during that exact home
+appointment. An invitation target must:
+
+- be advertised by a directly heard visitor;
+- differ from the singleton's current home;
+- have at least two fresh associated members; and
+- remain locally visible, eligible, and supported by fresh beacon timing.
+
+If several visitors advertise eligible destinations, the singleton chooses the
+largest fresh group estimate, breaking equal-size ties by lowest BSSID. It then
+commits immediately, with no credibility delay. A partial home appointment may
+provide positive invitation evidence; missing traffic is never negative
+evidence. This path is disabled as soon as the board is no longer a singleton.
 
 ## Established-member behavior
 
@@ -367,6 +388,8 @@ result: no migration evaluation and no negative membership conclusion
 - `scout-positive-evidence`: direct packets advertising the scout target and
   whether the appointment was full.
 - `singleton-join direct`: immediate singleton adoption.
+- `singleton-join visitor`: immediate adoption of a group advertised by a
+  visitor during the singleton's home appointment.
 - `migration-proposal direct`: new proposal, group estimates, credibility, and
   activation round.
 - `migration-proposal refreshed`: same target seen again.
