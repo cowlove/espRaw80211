@@ -2114,6 +2114,12 @@ static __attribute__((section("CSIM_RTC_MEM")))
 struct GlobalConvergenceReporter : public Csim_Module {
     static constexpr uint32_t stateMagic = 0x43474c42; // "CGLB"
     uint64_t nextCheckUsec = 0;
+    bool exitOnConvergence = false;
+
+    void parseArg(char **&arg, char **) override {
+        if (strcmp(*arg, "--exit-on-convergence") == 0)
+            exitOnConvergence = true;
+    }
 
     void loop() override {
         const uint64_t now = sim().bootTimeUsec + steadyMicros();
@@ -2144,6 +2150,10 @@ struct GlobalConvergenceReporter : public Csim_Module {
             printf("CSIM GLOBAL CONVERGENCE count=%u time=%.3f beacon=%012llx\n",
                    csimGlobalConvergenceState.count, now / 1000000.0,
                    (unsigned long long)commonHome);
+            if (exitOnConvergence) {
+                fflush(stdout);
+                Csim_exit();
+            }
         } else {
             printf("CSIM GLOBAL DIVERGENCE count=%u time=%.3f\n",
                    csimGlobalConvergenceState.count, now / 1000000.0);

@@ -154,6 +154,17 @@ re-execs, so `rand()` does not restart from the same point after every wake:
   --random-seed 17 > seed-17.log
 ```
 
+For migration-policy experiments, stop at the first global convergence so the
+10/10 qualification and reset delay do not dominate the metric:
+
+```sh
+./scripts/run_csim.sh --seconds 3600 --reception-scale 0.60 \
+  --random-seed 17 --exit-on-convergence
+```
+
+The convergence marker's `time=` field is the clean-start convergence latency.
+No marker means that seed timed out without converging.
+
 - Only one Wi-Fi channel is monitored.
 - A common beacon may not be physically visible to every board; a stable
   logical partition is then valid behavior.
