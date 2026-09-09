@@ -289,14 +289,48 @@ def reset_recovery_events(datasets, required: int, max_skew: float = 90):
                 observations.append((cycle.wall, name, cycle.home))
     observations.sort()
     results = []
-    for wave in waves:
+    wave_index = 0
+    while wave_index < len(waves):
+        wave = waves[wave_index]
+        # Reset waves can overlap one recovery episode.  Evaluate from the
+        # latest reset currently in the episode, then absorb any subsequent
+        # wave that occurs before its resulting consensus.  This prevents one
+        # rendezvous from being printed once per staggered board reset.
+        episode_waves = [wave]
+        next_index = wave_index + 1
+        while True:
+            latest_reset = episode_waves[-1]['last']
+            latest = {}
+            fragmented_at = None
+            for wall, name, home in observations:
+                if wall < latest_reset:
+                    continue
+                latest[name] = (wall, home)
+                if (len(latest) == len(board_names) and
+                        len({value[1] for value in latest.values()}) > 1):
+                    fragmented_at = wall
+                    break
+            following = [event for event in consensus
+                         if fragmented_at is not None and
+                         event['host_time'] >= fragmented_at]
+            event = following[0] if following else None
+            if (event is not None and next_index < len(waves) and
+                    waves[next_index]['first'] <= event['host_time']):
+                episode_waves.append(waves[next_index])
+                next_index += 1
+                continue
+            break
+
+        boards = set()
+        for member_wave in episode_waves:
+            boards.update(member_wave['boards'])
         # An old common home may still be visible after only one board resets.
         # Require a complete post-wave snapshot that actually fragments before
         # accepting a later same-home event as recovery.
         latest = {}
         fragmented_at = None
         for wall, name, home in observations:
-            if wall < wave['last']:
+            if wall < episode_waves[-1]['last']:
                 continue
             latest[name] = (wall, home)
             if (len(latest) == len(board_names) and
@@ -308,19 +342,20 @@ def reset_recovery_events(datasets, required: int, max_skew: float = 90):
                      event['host_time'] >= fragmented_at]
         event = following[0] if following else None
         results.append({
-            'reset_time': wave['first'],
-            'reset_end': wave['last'],
-            'boards': sorted(wave['boards']),
+            'reset_time': episode_waves[0]['first'],
+            'reset_end': episode_waves[-1]['last'],
+            'boards': sorted(boards),
             'fragmented_time': fragmented_at,
             'consensus_time': event['host_time'] if event else None,
             'bssid': event['bssid'] if event else None,
-            'latency': (event['host_time'] - wave['first']) if event else None,
+            'latency': (event['host_time'] - episode_waves[0]['first']) if event else None,
         })
+        wave_index = next_index
     return results
 
 
 def print_reset_recovery(datasets, required: int) -> None:
-    print('Reset-wave recovery | reset execution → next emerging consensus')
+    print('Rendezvous recovery events | reset episode → emerging consensus')
     results = reset_recovery_events(datasets, required)
     if not results:
         print('  no TEST RESET EXECUTED records in selected logs')
@@ -329,14 +364,14 @@ def print_reset_recovery(datasets, required: int) -> None:
     for row in results:
         reset = datetime.fromtimestamp(row['reset_time']).astimezone().isoformat(timespec='seconds')
         if row['fragmented_time'] is None:
-            print(f"  {reset} boards={len(row['boards'])} fragmented=not-observed")
+            print(f"  reset={reset} status=fragmentation-not-observed")
         elif row['latency'] is None:
             fragmented = datetime.fromtimestamp(row['fragmented_time']).astimezone().isoformat(timespec='seconds')
-            print(f"  {reset} boards={len(row['boards'])} fragmented={fragmented} consensus=none-after-fragmentation")
+            print(f"  reset={reset} fragmented={fragmented} status=consensus-not-observed")
         else:
             fragmented = datetime.fromtimestamp(row['fragmented_time']).astimezone().isoformat(timespec='seconds')
             consensus = datetime.fromtimestamp(row['consensus_time']).astimezone().isoformat(timespec='seconds')
-            print(f"  {reset} boards={len(row['boards'])} fragmented={fragmented} latency={row['latency']:.1f}s consensus={consensus} home={row['bssid']}")
+            print(f"  reset={reset} fragmented={fragmented} consensus={consensus} latency={row['latency']:.1f}s home={row['bssid']}")
     if completed:
         values = [row['latency'] for row in completed]
         print(f"  summary completed={len(completed)}/{len(results)} median={statistics.median(values):.1f}s min={min(values):.1f}s max={max(values):.1f}s")
