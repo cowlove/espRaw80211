@@ -140,14 +140,9 @@ This creates an important distinction:
 Home appointments are planned first. A scout can be added only when it fits the
 awake-time budget and does not displace the home appointment.
 
-Scouting is considered every two logical rounds. Each eligible non-home beacon
-gets one selection ticket. When an established group has fresh association
-evidence that a locally visible beacon contains exactly one member, that
-beacon gets one additional ticket. The resulting weighted random choice keeps
-every destination discoverable while gently favoring visits that can carry a
-larger-group invitation to an isolated board. It adds no new progression or
-persistent targeting state. Overlapping or nearby radio windows may be merged
-into one awake interval.
+Scouting is considered every two logical rounds. Eligible non-home beacons are
+visited in a fair rotating sequence. Overlapping or nearby radio windows may
+be merged into one awake interval.
 
 The scheduler may discover that an appointment has already partly elapsed when
 it builds or enters the interval. Such an appointment is partial (`full 0`),
@@ -413,9 +408,6 @@ result: no migration evaluation and no negative membership conclusion
 - `singleton-join visitor`: immediate adoption of a group advertised by a
   visitor during the singleton's home appointment.
 - `singleton-coalesce`: a 1+1 encounter resolved toward the lower BSSID.
-- `scout-weighted`: a scout selection made while one or more fresh rumored
-  singleton targets were eligible; reports whether the selected target had
-  the additional ticket.
 - `visitor-positive-evidence`: a directly heard visitor advertised an eligible
   alternative home during this home appointment.
 - `migration-proposal visitor`: an established member proposed a larger group

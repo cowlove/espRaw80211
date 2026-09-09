@@ -1487,42 +1487,17 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             !executionPlan.addHome(first) || !executionPlan.addHome(second)) return false;
         if (wakeGeneration - spiffsLastScoutRound.read() >= scoutIntervalWakes) {
             uint64_t candidates[packetLogSize];
-            uint64_t targetedCandidates[packetLogSize];
             size_t count = 0;
-            size_t targetedCount = 0;
-            const bool establishedHome = listenerCount(home) >= 2;
             for (const BeaconInfo &info : packetLog)
                 if (info.ssid && info.rssi >= reportMinRssi &&
-                    info.count >= minimumCandidatePackets && freshTiming(info.ssid, now)) {
+                    info.count >= minimumCandidatePackets && freshTiming(info.ssid, now))
                     candidates[count++] = info.ssid;
-                    if (establishedHome && info.ssid != home &&
-                        listenerCount(info.ssid) == 1)
-                        targetedCandidates[targetedCount++] = info.ssid;
-                }
             uint64_t selected = spiffsScoutBeacon.read();
             bool eligible = false;
             for (size_t i = 0; i < count; ++i)
                 if (candidates[i] == selected && selected != home) eligible = true;
-            if (!eligible) {
-#ifdef CSIM
-                const uint32_t randomValue = (uint32_t)rand();
-#else
-                const uint32_t randomValue = esp_random();
-#endif
-                selected = RendezvousPlanner::chooseWeightedScout(
-                    candidates, count, targetedCandidates, targetedCount,
-                    home, randomValue);
-                bool selectedTargeted = false;
-                for (size_t i = 0; i < targetedCount; ++i)
-                    if (targetedCandidates[i] == selected)
-                        selectedTargeted = true;
-                if (targetedCount)
-                    out("scout-weighted rumors %u selected %012llx targeted %u weight %u",
-                        (unsigned)targetedCount,
-                        (unsigned long long)selected,
-                        selectedTargeted ? 1U : 0U,
-                        selectedTargeted ? 2U : 1U);
-            }
+            if (!eligible) selected = RendezvousPlanner::chooseScout(candidates, count,
+                home, spiffsScoutCursor.read());
             const BeaconInfo *other = freshTiming(selected, now);
             if (other && RendezvousPlanner::nextAppointment(selected, other->ts,
                 other->seen2, now, period, beaconSamplingWindowUsec,
