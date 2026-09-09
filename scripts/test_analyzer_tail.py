@@ -38,7 +38,7 @@ class AnalyzerTailTests(unittest.TestCase):
 
     def test_reset_recovery_reports_minimum_to_consensus_transition(self):
         log_a = b'2026-09-09T08:00:00+00:00 host_mono_ns=1 board=a port=p session=s | TEST RESET EXECUTED\n'
-        log_b = b'2026-09-09T08:00:20+00:00 host_mono_ns=2 board=b port=p session=s | TEST RESET EXECUTED\n'
+        log_b = b'2026-09-09T08:00:40+00:00 host_mono_ns=2 board=b port=p session=s | TEST RESET EXECUTED\n'
         cycles_a = [SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:00:30+00:00'), home='aaaa'),
                     SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:00:31+00:00'), home='bbbb'),
                     SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:01:00+00:00'), home='deadbeef')]
@@ -51,7 +51,7 @@ class AnalyzerTailTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['bssid'], 'deadbeef')
         self.assertEqual(rows[0]['minimum_size'], 1)
-        self.assertEqual(rows[0]['latency'], 29.0)
+        self.assertEqual(rows[0]['latency'], 0.0)
 
 
 if __name__ == '__main__':

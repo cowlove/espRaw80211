@@ -286,9 +286,19 @@ def reset_recovery_events(datasets, required: int, max_skew: float = 90):
     minimum = None
     minimum_start = None
     minimum_end = None
+    last_observation = None
     results = []
     for wall, name, home in observations:
+        # A reset during the minimum plateau starts a new measurement epoch.
+        # Do this before updating the board snapshot so the first complete
+        # post-reset minimum observation becomes the new minimum start.
+        if minimum_start is not None and any(
+                last_observation < reset <= wall for reset in reset_times):
+            minimum = None
+            minimum_start = None
+            minimum_end = None
         latest[name] = (wall, home)
+        last_observation = wall
         if len(latest) < len(board_names):
             continue
         counts = {}
