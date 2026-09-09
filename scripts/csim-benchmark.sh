@@ -4,7 +4,14 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 runner="$script_dir/run_csim.sh"
 
-iterations=200
+default_iterations=200
+requested_iterations=${1:-$default_iterations}
+if (( $# > 1 )) || [[ ! $requested_iterations =~ ^[0-9]+$ ]] ||
+        (( requested_iterations < 1 )); then
+    echo "usage: $0 [iterations]" >&2
+    exit 2
+fi
+iterations=$requested_iterations
 timeout_seconds=3600
 reception_scale=0.60
 jobs=$(nproc)
