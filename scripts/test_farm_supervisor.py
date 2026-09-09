@@ -24,6 +24,7 @@ from test_swarm_config import swarm_board_count
 
 DEFAULT_STATUS_LOG = Path(__file__).resolve().parents[1] / 'test-farm-supervisor.log'
 status_log = None
+FOREIGN_MAC = 'e072a1a23784'
 
 
 def timestamped(message, now=None):
@@ -61,6 +62,23 @@ def format_home_groups(groups, unknown=()):
     if unknown:
         parts.append('?=' + ','.join(sorted(board_alias(name) for name in unknown)))
     return ' '.join(parts)
+
+
+def foreign_present(datasets, now, max_age, mac=FOREIGN_MAC):
+    """Return whether recent association output mentions the foreign board."""
+    needle = mac.lower().replace(':', '')
+    patterns = (
+        f'association origin {needle}',
+        f'matrix association device {needle}',
+    )
+    for _, data in datasets:
+        for _, _, wall, body in evidence.records(data):
+            if wall is None or now - wall < -5 or now - wall > max_age:
+                continue
+            compact = body.replace(':', '').lower()
+            if any(pattern in compact for pattern in patterns):
+                return True
+    return False
 
 
 def convergence_state(datasets, now, required, max_age,
@@ -262,6 +280,8 @@ def main():
             topology = format_home_groups(groups, unknown)
             status = (reason if reason.startswith('NC') else f'not converged: {reason}')
             status += f' | {topology}' if topology else ''
+            if foreign_present(datasets, now, args.freshness_seconds):
+                status += ' F+'
             if status != last_status:
                 timestamped(status, now)
                 last_status = status
@@ -271,7 +291,9 @@ def main():
             last_status = None
             elapsed = (f' since-reset={max(0, now-last_epoch_time):.0f}s'
                        if last_epoch_time is not None else '')
-            timestamped(f'candidate home={beacon_alias(home)}; sustain timer started{elapsed}',
+            foreign = (' F+' if foreign_present(
+                datasets, now, args.freshness_seconds) else '')
+            timestamped(f'candidate home={beacon_alias(home)}; sustain timer started{elapsed}{foreign}',
                         now)
         else:
             sustained = now - candidate_since

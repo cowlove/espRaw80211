@@ -94,6 +94,22 @@ class InfrastructureTests(unittest.TestCase):
             supervisor.format_home_groups(groups, ['local usb2', 'local usb1']),
             '60..da8a=L0,L3,M1 66..e676=L4,M0 ?=L1,L2')
 
+    def test_supervisor_marks_recent_foreign_association(self):
+        data = (b'2026-09-09T10:00:00+00:00 host_mono_ns=1 board=usb0 '
+                b'port=p session=s | association origin e072a1a23784 '
+                b'selected 60a4b792e676 generation 1 age 0 selected-home 1 '
+                b'fresh 1 qualifies 1\n')
+        now = supervisor.evidence.timestamp('2026-09-09T10:00:05+00:00')
+        self.assertTrue(supervisor.foreign_present([('usb0', data)], now, 180))
+
+    def test_supervisor_ignores_stale_foreign_association(self):
+        data = (b'2026-09-09T09:00:00+00:00 host_mono_ns=1 board=usb0 '
+                b'port=p session=s | association origin e072a1a23784 '
+                b'selected 60a4b792e676 generation 1 age 0 selected-home 1 '
+                b'fresh 1 qualifies 1\n')
+        now = supervisor.evidence.timestamp('2026-09-09T10:00:05+00:00')
+        self.assertFalse(supervisor.foreign_present([('usb0', data)], now, 180))
+
     def test_supervisor_timestamp_is_compact(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
