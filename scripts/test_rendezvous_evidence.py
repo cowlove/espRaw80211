@@ -120,6 +120,22 @@ class EvidenceTests(unittest.TestCase):
         cycles, _ = evidence.parse_evidence(data)
         self.assertEqual(cycles[0].peers['123']['radio-from'], '321')
 
+    def test_compact_and_legacy_diagnostics_summarize_identically(self):
+        legacy = (line('00009.0 origin-incarnation rejected 2') +
+                  line('00009.1 report-framing bad-length 1') +
+                  line('00009.2 association-merge attempts 9 accepted 3 rejected 6 invalid 1 older-generation 2 not-fresher 3 table-full 0') +
+                  line('00009.3 espnow summary origin 123 radio-from 321 frames 8 valid 7 short 1 bad-version 0 association-refresh 4 claim-entries 5 radio-mismatch 0 first 100 last 200 origin-radio 321'))
+        compact = (line('00009.0 @x er=2 bl=1 ma=9 ok=3 iv=1 og=2 nf=3 tf=0 hp=1 kp=1') +
+                   line('00009.1 @p o=123 r=321 f=8 v=7 s=1 bv=0 ar=4 ce=5 rm=0 a=100 z=200 or=321'))
+        legacy_summary = evidence.summarize(cycle(extra=legacy, wire=7))
+        compact_summary = evidence.summarize(cycle(extra=compact, wire=7))
+        for key in ('merge', 'bad_length', 'epoch_rejections_including_self',
+                    'valid_reports'):
+            self.assertEqual(compact_summary[key], legacy_summary[key])
+        legacy_cycles, _ = evidence.parse_evidence(cycle(extra=legacy, wire=7))
+        compact_cycles, _ = evidence.parse_evidence(cycle(extra=compact, wire=7))
+        self.assertEqual(compact_cycles[0].peers, legacy_cycles[0].peers)
+
     def test_concatenated_tx_does_not_overwrite_rx_incarnation(self):
         extra = line(
             '00006.0 report-clock-rx sender aaa incarnation a1 wake 1 packet 0 '

@@ -24,6 +24,10 @@
 #define CSIM_ASSERT(condition) assert(condition)
 #endif
 
+#ifdef CSIM
+static bool csimLegacyDiagnostics = false;
+#endif
+
 // Wi-Fi receive timestamps already use esp_timer_get_time(). Keep every
 // scheduler deadline in that same 64-bit, boot-relative time domain. Arduino's
 // micros() is only 32 bits on ESP32 and wraps after roughly 71m35s.
@@ -678,6 +682,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
     void dumpAssociationTable(uint64_t homeBssid) const {
+#ifdef CSIM
+        if (csimLegacyDiagnostics) {
         out("association-table home %012llx listeners %d freshness %u wake %u",
             (unsigned long long)homeBssid, (int)listenerCount(homeBssid),
             associationFreshnessCycles, wakeGeneration);
@@ -693,6 +699,19 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 selectedHome ? 1U : 0U, fresh ? 1U : 0U,
                 selectedHome && fresh ? 1U : 0U);
         }
+        return;
+        }
+#endif
+        size_t entries = 0, freshEntries = 0;
+        for (const BeaconAssociation &association : associations) {
+            if (association.originMac == 0) continue;
+            ++entries;
+            if (associationAgeCycles(association) <= associationFreshnessCycles)
+                ++freshEntries;
+        }
+        out("@a h=%012llx l=%u n=%u f=%u w=%u",
+            (unsigned long long)homeBssid, (unsigned)listenerCount(homeBssid),
+            (unsigned)entries, (unsigned)freshEntries, wakeGeneration);
     }
 
     static int score(const BeaconInfo &info) { return info.count; }
@@ -1216,6 +1235,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
     void dumpExchangePeers() const {
+#ifdef CSIM
+        if (csimLegacyDiagnostics) {
         out("origin-incarnation rejected %u", epochRejected);
         out("report-framing bad-length %u", reportBadLength);
         out("association-merge attempts %u accepted %u rejected %u invalid %u older-generation %u not-fresher %u table-full %u",
@@ -1270,6 +1291,39 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 out("espnow missing peer %012llx",
                     (unsigned long long)claim.originMac);
         }
+        return;
+        }
+#endif
+        size_t knownPeers = 0;
+        for (const BeaconClaim &claim : claims) {
+            if (claim.originMac == 0 || claim.originMac == deviceMac) continue;
+            bool duplicate = false;
+            for (const BeaconClaim &prior : claims)
+                if (&prior < &claim && prior.originMac == claim.originMac)
+                    duplicate = true;
+            if (!duplicate) knownPeers++;
+        }
+        size_t heardPeers = 0;
+        for (uint8_t i = 0; i < reportSenderCount; ++i)
+            if (reportSenders[i] != deviceMac && reportSenderValid[i] != 0)
+                heardPeers++;
+        out("espnow heard %u/%u known peers", (unsigned)heardPeers,
+            (unsigned)knownPeers);
+        out("@x er=%u bl=%u ma=%u ok=%u iv=%u og=%u nf=%u tf=%u hp=%u kp=%u",
+            epochRejected, reportBadLength, associationMergeAttempts,
+            associationMergeAccepted, associationMergeInvalid,
+            associationMergeOlder, associationMergeNotFresher,
+            associationMergeFull, (unsigned)heardPeers, (unsigned)knownPeers);
+        for (uint8_t i = 0; i < reportSenderCount; ++i)
+            out("@p o=%012llx r=%012llx f=%u v=%u s=%u bv=%u ar=%u ce=%u rm=%u a=%llu z=%llu or=%012llx",
+                (unsigned long long)reportSenders[i],
+                (unsigned long long)reportSenderRadioFrom[i],
+                reportSenderRaw[i], reportSenderValid[i], reportSenderShort[i],
+                reportSenderBadVersion[i], reportSenderAssociationRefresh[i],
+                reportSenderClaimEntries[i], reportSenderRadioMismatch[i],
+                (unsigned long long)reportSenderFirstUsec[i],
+                (unsigned long long)reportSenderLastUsec[i],
+                (unsigned long long)protocolRadioMac(reportSenders[i]));
     }
 
     void publishReport() {
@@ -2127,6 +2181,8 @@ struct GlobalConvergenceReporter : public Csim_Module {
     void parseArg(char **&arg, char **) override {
         if (strcmp(*arg, "--exit-on-convergence") == 0)
             exitOnConvergence = true;
+        else if (strcmp(*arg, "--legacy-diagnostics") == 0)
+            csimLegacyDiagnostics = true;
     }
 
     void loop() override {

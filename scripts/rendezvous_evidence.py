@@ -131,6 +131,19 @@ def parse_evidence(data):
         if 'association-merge attempts ' in body:
             current.merge = {key: int(value) for key, value in
                              re.findall(r'([a-z-]+) (\d+)', body)}
+        if '@x ' in body:
+            values = dict(re.findall(r'([a-z]+)=(\d+)', body.split('@x ', 1)[1]))
+            current.epoch_rejected = int(values.get('er', 0))
+            current.bad_length = int(values.get('bl', 0))
+            current.merge = {
+                'attempts': int(values.get('ma', 0)),
+                'accepted': int(values.get('ok', 0)),
+                'rejected': int(values.get('ma', 0)) - int(values.get('ok', 0)),
+                'invalid': int(values.get('iv', 0)),
+                'older-generation': int(values.get('og', 0)),
+                'not-fresher': int(values.get('nf', 0)),
+                'table-full': int(values.get('tf', 0)),
+            }
         found = re.search(r'origin-incarnation rejected (\d+)', body)
         if found:
             current.epoch_rejected = int(found[1])
@@ -139,6 +152,16 @@ def parse_evidence(data):
             current.bad_length = int(found[1])
         if 'espnow summary origin ' in body:
             values = fields(body.split('espnow summary ', 1)[1])
+            current.peers[values['origin']] = values
+        if '@p ' in body:
+            compact = dict(re.findall(r'([a-z]+)=([^ ]+)', body.split('@p ', 1)[1]))
+            names = {'o': 'origin', 'r': 'radio-from', 'f': 'frames',
+                     'v': 'valid', 's': 'short', 'bv': 'bad-version',
+                     'ar': 'association-refresh', 'ce': 'claim-entries',
+                     'rm': 'radio-mismatch', 'a': 'first', 'z': 'last',
+                     'or': 'origin-radio'}
+            values = {names[key]: value for key, value in compact.items()
+                      if key in names}
             current.peers[values['origin']] = values
         if 'report-clock-rx sender ' in body:
             clock_body = body.split('report-clock-rx ', 1)[1]

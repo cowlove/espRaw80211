@@ -174,6 +174,16 @@ Run the fixed 200-seed benchmark in parallel using all available processors:
 It reports the convergence success/timeout counts and the minimum, median,
 mean, p95, and maximum first-convergence times.
 
+Firmware output defaults to compact, line-oriented ASCII diagnostics. Human
+status and decision records remain descriptive; repeated exchange details use
+`@x` (counters), `@p` (peer summary), and `@a` (association summary). Historical
+verbose logs remain supported by the analyzer. Verify both encodings produce
+identical analysis with:
+
+```sh
+./scripts/test_csim_log_compatibility.sh
+```
+
 - Only one Wi-Fi channel is monitored.
 - A common beacon may not be physically visible to every board; a stable
   logical partition is then valid behavior.
