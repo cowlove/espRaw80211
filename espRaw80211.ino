@@ -1860,6 +1860,16 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
 public:
+#ifdef CSIM
+    uint64_t csimHomeBeacon() {
+        CsimContext *saved = currentContext;
+        currentContext = context;
+        const uint64_t home = spiffsBeacon.read();
+        currentContext = saved;
+        return home;
+    }
+#endif
+
     explicit BeaconRendezvousContext(uint64_t address = 0) :
         BeaconRendezvousContextBase(address) {
 #ifdef CSIM
@@ -2055,6 +2065,59 @@ struct ContextFleet {
     }
 };
 static ContextFleet rendezvousFleet;
+
+// Process re-execution is part of CSIM's private-context deep-sleep model.
+// Keep the transition state in simulated RTC memory so a continuously
+// converged fleet produces exactly one grep-friendly marker, rather than one
+// marker after every process re-exec.
+struct CsimGlobalConvergenceState {
+    uint32_t magic;
+    uint32_t count;
+    bool converged;
+};
+static __attribute__((section("CSIM_RTC_MEM")))
+    CsimGlobalConvergenceState csimGlobalConvergenceState;
+
+struct GlobalConvergenceReporter : public Csim_Module {
+    static constexpr uint32_t stateMagic = 0x43474c42; // "CGLB"
+    uint64_t nextCheckUsec = 0;
+
+    void loop() override {
+        const uint64_t now = sim().bootTimeUsec + steadyMicros();
+        if (now < nextCheckUsec) return;
+        nextCheckUsec = now + 100000ULL;
+
+        if (csimGlobalConvergenceState.magic != stateMagic) {
+            csimGlobalConvergenceState.magic = stateMagic;
+            csimGlobalConvergenceState.count = 0;
+            csimGlobalConvergenceState.converged = false;
+        }
+
+        uint64_t commonHome = 0;
+        bool converged = true;
+        for (uint8_t i = 0; i < CONTEXT_COUNT; ++i) {
+            const uint64_t home = rendezvousFleet.contexts[i]->csimHomeBeacon();
+            if (!home || (commonHome && home != commonHome)) {
+                converged = false;
+                break;
+            }
+            commonHome = home;
+        }
+
+        if (converged == csimGlobalConvergenceState.converged) return;
+        csimGlobalConvergenceState.converged = converged;
+        if (converged) {
+            ++csimGlobalConvergenceState.count;
+            printf("CSIM GLOBAL CONVERGENCE count=%u time=%.3f beacon=%012llx\n",
+                   csimGlobalConvergenceState.count, now / 1000000.0,
+                   (unsigned long long)commonHome);
+        } else {
+            printf("CSIM GLOBAL DIVERGENCE count=%u time=%.3f\n",
+                   csimGlobalConvergenceState.count, now / 1000000.0);
+        }
+    }
+};
+static GlobalConvergenceReporter globalConvergenceReporter;
 #else
 BeaconRendezvousContext rendezvous0(0xddeeff000001ULL);
 #endif

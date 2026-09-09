@@ -120,6 +120,23 @@ make BOARD=csim clear-state
 ./espRaw80211_csim --seconds 7200 --reception-scale 0.8
 ```
 
+CSIM emits one process-wide marker whenever all simulated boards transition
+onto the same nonzero home beacon, and a matching marker when that topology
+diverges again:
+
+```text
+CSIM GLOBAL CONVERGENCE count=1 time=345.136 beacon=60a4b792e686
+CSIM GLOBAL DIVERGENCE count=1 time=824.594
+```
+
+This makes long-run convergence throughput directly countable without parsing
+the per-board trace:
+
+```sh
+./espRaw80211_csim --seconds 18000 --reception-scale 0.60 > csim-5h.log
+grep -c 'CSIM GLOBAL CONVERGENCE' csim-5h.log
+```
+
 - Only one Wi-Fi channel is monitored.
 - A common beacon may not be physically visible to every board; a stable
   logical partition is then valid behavior.
