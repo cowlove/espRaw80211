@@ -137,6 +137,14 @@ the per-board trace:
 grep -c 'CSIM GLOBAL CONVERGENCE' csim-5h.log
 ```
 
+Use the runner for concurrent or independent experiments. It gives every run
+private simulated SPIFFS, RTC, and sleep-checkpoint state while forwarding all
+arguments to the same CSIM executable:
+
+```sh
+./scripts/run_csim.sh --seconds 18000 --reception-scale 0.60 > csim-5h.log
+```
+
 - Only one Wi-Fi channel is monitored.
 - A common beacon may not be physically visible to every board; a stable
   logical partition is then valid behavior.
