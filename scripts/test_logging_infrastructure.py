@@ -124,6 +124,13 @@ class InfrastructureTests(unittest.TestCase):
         now = supervisor.evidence.timestamp('2026-09-09T10:00:05+00:00')
         self.assertTrue(supervisor.foreign_present([('usb0', data)], now, 180))
 
+    def test_supervisor_marks_compact_foreign_radio_sender(self):
+        data = (b'2026-09-09T10:00:00+00:00 host_mono_ns=1 board=usb0 '
+                b'port=p session=s | @p o=8437a2a172e0 r=e072a1a23784 '
+                b'f=3 v=3\n')
+        now = supervisor.evidence.timestamp('2026-09-09T10:00:05+00:00')
+        self.assertTrue(supervisor.foreign_present([('usb0', data)], now, 180))
+
     def test_supervisor_timestamp_is_compact(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:

@@ -71,7 +71,9 @@ def foreign_present(datasets, now, max_age, mac=FOREIGN_MAC):
         f'association origin {needle}',
         f'matrix association device {needle}',
         f'espnow summary origin {needle}',
+        f'radio-from {needle}',
         f'@p o={needle}',
+        f'r={needle}',
         f'report-clock-rx sender {needle}',
         f'@r s={needle}',
     )
