@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 runner="$script_dir/run_csim.sh"
 
-iterations=100
+iterations=200
 timeout_seconds=3600
 reception_scale=0.60
 jobs=$(nproc)
