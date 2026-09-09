@@ -85,6 +85,11 @@ def foreign_present(datasets, now, max_age, mac=FOREIGN_MAC):
     return False
 
 
+def foreign_status(datasets, now, max_age):
+    """Return the compact fixed-format foreign-board status field."""
+    return 'F+' if foreign_present(datasets, now, max_age) else 'F-'
+
+
 def convergence_state(datasets, now, required, max_age,
                       observation_floors=None):
     """Return unanimous home, failure reason, and current usable home groups."""
@@ -258,20 +263,25 @@ def main():
         if reset_time is not None:
             acknowledged = epoch_acknowledgments(datasets, reset_time)
             missing = sorted(name for name, _ in datasets if name not in acknowledged)
-            status = f'reset id={reset_token} acknowledged={len(acknowledged)}/{required}'
+            status = (f'reset id={reset_token} acknowledged={len(acknowledged)}/{required}  '
+                      f'{foreign_status(datasets, now, args.freshness_seconds)}')
             if status != last_status:
                 timestamped(status + (f' missing={",".join(missing)}' if missing else ''))
                 last_status = status
             if len(acknowledged) == required:
-                timestamped(f'reset id={reset_token} complete; monitoring new epoch')
+                timestamped(
+                    f'reset id={reset_token} complete; monitoring new epoch  '
+                    f'{foreign_status(datasets, now, args.freshness_seconds)}')
                 observation_floors = acknowledged
                 last_epoch_time = max(acknowledged.values())
                 reset_time = reset_token = None
                 candidate_home = candidate_since = None
                 last_status = None
             elif now - reset_time > args.ack_timeout_seconds:
-                timestamped(f'reset id={reset_token} blocked after {now-reset_time:.0f}s; '
-                            f'missing={",".join(missing)}')
+                timestamped(
+                    f'reset id={reset_token} blocked after {now-reset_time:.0f}s; '
+                    f'missing={",".join(missing)}  '
+                    f'{foreign_status(datasets, now, args.freshness_seconds)}')
             time.sleep(args.poll_seconds)
             continue
 
@@ -284,8 +294,7 @@ def main():
             topology = format_home_groups(groups, unknown)
             status = (reason if reason.startswith('NC') else f'not converged: {reason}')
             status += f' | {topology}' if topology else ''
-            if foreign_present(datasets, now, args.freshness_seconds):
-                status += ' F+'
+            status += f'  {foreign_status(datasets, now, args.freshness_seconds)}'
             if status != last_status:
                 timestamped(status, now)
                 last_status = status
@@ -295,20 +304,22 @@ def main():
             last_status = None
             elapsed = (f' since-reset={max(0, now-last_epoch_time):.0f}s'
                        if last_epoch_time is not None else '')
-            foreign = (' F+' if foreign_present(
-                datasets, now, args.freshness_seconds) else '')
-            timestamped(f'candidate home={beacon_alias(home)}; sustain timer started{elapsed}{foreign}',
+            foreign = foreign_status(datasets, now, args.freshness_seconds)
+            timestamped(f'candidate home={beacon_alias(home)}; sustain timer started{elapsed}  {foreign}',
                         now)
         else:
             sustained = now - candidate_since
-            status = f'converged home={home} sustained={sustained:.0f}s'
+            status = (f'converged home={home} sustained={sustained:.0f}s  '
+                      f'{foreign_status(datasets, now, args.freshness_seconds)}')
             if status != last_status:
                 timestamped(status, now)
                 last_status = status
             if sustained >= args.sustain_seconds:
                 reset_token = uuid.uuid4().hex
                 reset_time = time.time()
-                timestamped(f'requesting coordinated cold reset id={reset_token} home={home}')
+                timestamped(
+                    f'requesting coordinated cold reset id={reset_token} home={home}  '
+                    f'{foreign_status(datasets, now, args.freshness_seconds)}')
                 issue_reset_requests(args.remote_host, local_boards, remote_boards,
                                      reset_token, args.dry_run)
                 if args.dry_run:
