@@ -2,9 +2,8 @@ BOARD ?= esp32
 # The generated empirical CSIM model owns the default simulated fleet size.
 CONTEXT_COUNT ?= $(shell sed -n 's/.*boardCount = \([0-9][0-9]*\).*/\1/p' csimPairwiseData.h)
 
-ifeq ($(BOARD),esp32)
+ifneq ($(filter esp32 esp32s3,$(BOARD)),)
 CHIP=esp32
-OTA_ADDR=192.168.68.118
 BUILD_MEMORY_TYPE=qio_qspi
 BUILD_EXTRA_FLAGS += -DI2S
 ALIBS=${HOME}/Arduino/libraries
@@ -12,6 +11,16 @@ EXCLUDE_DIRS=${ALIBS}/lvgl|${ALIBS}/LovyanGFX|${ALIBS}/esp32csim|${ALIBS}/PubSub
 GIT_VERSION := "$(shell git describe --abbrev=4 --dirty --always --tags)"
 BUILD_EXTRA_FLAGS += -DGIT_VERSION=\"$(GIT_VERSION)\"
 BUILD_EXTRA_FLAGS += -DESP32CORE_V2
+
+ifeq ($(BOARD),esp32)
+OTA_ADDR=192.168.68.118
+else ifeq ($(BOARD),esp32s3)
+# ESP32-S3 boards use native USB CDC and the compact partition layout.
+UPLOAD_PORT ?= /dev/ttyACM0
+PART_FILE=${ESP_ROOT}/tools/partitions/min_spiffs.csv
+CDC_ON_BOOT=1
+endif
+
 include ${HOME}/Arduino/libraries/makeEspArduino/makeEspArduino.mk
 
 .PHONY: hardware-upload upload-only fixtty cat uc
