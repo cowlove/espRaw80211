@@ -65,14 +65,15 @@ class InfrastructureTests(unittest.TestCase):
         self.assertEqual(supervisor.epoch_acknowledgments([('usb0', data)],
                                                           marker + 5), {})
 
-    def test_latest_epoch_boundary_uses_last_marker_in_complete_wave(self):
+    def test_latest_epoch_boundary_uses_newest_retained_marker(self):
         def marker(second):
             return (f'2026-09-09T10:00:{second:02d}+00:00 host_mono_ns=1 '
                     f'board=usb port=p session=s | TEST EPOCH RESET reason=cold\n').encode()
         datasets = [('local usb0', marker(1)), ('miner6 usb0', marker(4))]
         expected = supervisor.evidence.timestamp('2026-09-09T10:00:04+00:00')
         self.assertEqual(supervisor.latest_epoch_boundary(datasets, 10), expected)
-        self.assertIsNone(supervisor.latest_epoch_boundary(datasets, 2))
+        self.assertEqual(supervisor.latest_epoch_boundary(datasets[:1], 2),
+                         supervisor.evidence.timestamp('2026-09-09T10:00:01+00:00'))
 
     def test_supervisor_rejects_pre_epoch_home_observation(self):
         now = 1_800_000_000

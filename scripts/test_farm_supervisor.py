@@ -131,13 +131,15 @@ def epoch_acknowledgments(datasets, request_time):
     return acknowledged
 
 
-def latest_epoch_boundary(datasets, max_spread):
-    """Return the end of the latest complete, coordinated epoch reset wave."""
+def latest_epoch_boundary(datasets, _max_spread):
+    """Return the newest epoch marker available in the retained log tails.
+
+    A supervisor restart can occur after one board's marker has already fallen
+    outside its tail.  Since reset requests are coordinated, the newest marker
+    is still the best persisted timestamp for the preceding reset.
+    """
     latest = epoch_acknowledgments(datasets, float('-inf'))
-    if len(latest) != len(datasets):
-        return None
-    times = list(latest.values())
-    return max(times) if max(times) - min(times) <= max_spread else None
+    return max(latest.values()) if latest else None
 
 
 def atomic_request(path, token):
