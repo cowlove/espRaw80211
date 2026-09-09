@@ -165,6 +165,15 @@ For migration-policy experiments, stop at the first global convergence so the
 The convergence marker's `time=` field is the clean-start convergence latency.
 No marker means that seed timed out without converging.
 
+Run the fixed 100-seed benchmark (about 20 seconds on the development host):
+
+```sh
+./scripts/csim-benchmark.sh
+```
+
+It reports the convergence success/timeout counts and the minimum, median,
+mean, p95, and maximum first-convergence times.
+
 - Only one Wi-Fi channel is monitored.
 - A common beacon may not be physically visible to every board; a stable
   logical partition is then valid behavior.
