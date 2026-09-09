@@ -1456,7 +1456,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         for (const BeaconInfo &info : packetLog)
             if (info.ssid == bssid && info.rssi >= reportMinRssi &&
                 info.count >= minimumCandidatePackets)
-                return freshTiming(bssid, now) != nullptr;
+                return observedTimingThisWake(bssid, now) != nullptr;
         return false;
     }
 
@@ -1541,7 +1541,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         intervalFailStart = privMux.getSendFailures();
     }
 
-    const BeaconInfo *freshTiming(uint64_t bssid, uint64_t now) const {
+    const BeaconInfo *observedTimingThisWake(uint64_t bssid, uint64_t now) const {
         for (const BeaconInfo &info : packetLog)
             // packetLog is rebuilt on every wake, so a captured packet is
             // itself proof that this timing observation belongs to this wake.
@@ -1574,7 +1574,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                     (unsigned long long)home, packetLog[best].rssi,
                     packetLog[best].count);
         }
-        const BeaconInfo *timing = freshTiming(home, now);
+        const BeaconInfo *timing = observedTimingThisWake(home, now);
         if (!timing) return false; // recovery preserves home before strongest fallback
         executionPlan = RendezvousPlanner::Plan<4>(1000000);
         const uint64_t period = defaultRendezvousUsec;
@@ -1592,7 +1592,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             const bool establishedHome = listenerCount(home) >= 2;
             for (const BeaconInfo &info : packetLog)
                 if (info.ssid && info.rssi >= reportMinRssi &&
-                    info.count >= minimumCandidatePackets && freshTiming(info.ssid, now)) {
+                    info.count >= minimumCandidatePackets &&
+                    observedTimingThisWake(info.ssid, now)) {
                     candidates[count++] = info.ssid;
                     if (establishedHome && info.ssid != home &&
                         listenerCount(info.ssid) == 1)
@@ -1627,7 +1628,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                         home, spiffsScoutCursor.read());
                 }
             }
-            const BeaconInfo *other = freshTiming(selected, now);
+            const BeaconInfo *other = observedTimingThisWake(selected, now);
             if (other && RendezvousPlanner::nextAppointment(selected, other->ts,
                 other->seen2, now, period, beaconSamplingWindowUsec,
                 exchangeWindowUsec, false, scout)) {
@@ -1884,7 +1885,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             }
             delay(1); return;
         }
-        const BeaconInfo *timing = freshTiming(targetBeacon, now);
+        const BeaconInfo *timing = observedTimingThisWake(targetBeacon, now);
         uint64_t projectedStart = 0, projectedEnd = 0;
         if (timing && projectBeaconTsf(timing->ts, timing->seen2, espNowStartUsec, projectedStart) &&
             projectBeaconTsf(timing->ts, timing->seen2, espNowEndUsec, projectedEnd))

@@ -180,7 +180,9 @@ short `@` records (`@i` identity, `@e` exchange boundary, `@d` appointment,
 `@b` beacon clock, `@r`/`@t` radio clock, `@l` plan, `@x` counters, `@p` peer,
 `@a` association summary, and `@q` end-of-wake beacon scan). Each `@q` record
 contains BSSID `b`, average RSSI `r`, current-wake packet count `n`, age of the
-last observation in microseconds `a`, and the beacon TSF clock `t`. Historical
+last observation in microseconds `a`, and the beacon TSF clock `t`. Age is
+diagnostic only: beacon eligibility uses RSSI and packet count observed during
+the current wake, with no elapsed-time freshness cutoff. Historical
 verbose logs remain supported by the analyzer. Verify both encodings produce
 identical analysis with:
 
