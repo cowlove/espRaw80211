@@ -36,21 +36,22 @@ class AnalyzerTailTests(unittest.TestCase):
             analyzer.read_remote('host', '~/log', 123)
             self.assertIn('tail -c 123', run.call_args.args[0][-1])
 
-    def test_reset_recovery_groups_reset_wave_and_pairs_consensus(self):
+    def test_reset_recovery_reports_minimum_to_consensus_transition(self):
         log_a = b'2026-09-09T08:00:00+00:00 host_mono_ns=1 board=a port=p session=s | TEST RESET EXECUTED\n'
         log_b = b'2026-09-09T08:00:20+00:00 host_mono_ns=2 board=b port=p session=s | TEST RESET EXECUTED\n'
-        cycles = [SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:00:30+00:00'), home='aaaa'),
-                  SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:00:31+00:00'), home='bbbb')]
-        with patch.object(analyzer, 'global_home_convergences', return_value=[
-                {'host_time': analyzer.evidence.timestamp('2026-09-09T08:01:00+00:00'),
-                 'bssid': 'deadbeef'}]), \
-             patch.object(analyzer.evidence, 'parse_evidence', side_effect=[(cycles[:1], 0), (cycles[1:], 0)]):
+        cycles_a = [SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:00:30+00:00'), home='aaaa'),
+                    SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:00:31+00:00'), home='bbbb'),
+                    SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:01:00+00:00'), home='deadbeef')]
+        cycles_b = [SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:00:30+00:00'), home='aaaa'),
+                    SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:00:31+00:00'), home='aaaa'),
+                    SimpleNamespace(wall=analyzer.evidence.timestamp('2026-09-09T08:01:00+00:00'), home='deadbeef')]
+        with patch.object(analyzer.evidence, 'parse_evidence', side_effect=[(cycles_a, 0), (cycles_b, 0)]):
             rows = analyzer.reset_recovery_events(
                 [('a', log_a), ('b', log_b)], required=2)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]['boards'], ['a', 'b'])
         self.assertEqual(rows[0]['bssid'], 'deadbeef')
-        self.assertEqual(rows[0]['latency'], 60.0)
+        self.assertEqual(rows[0]['minimum_size'], 1)
+        self.assertEqual(rows[0]['latency'], 0.0)
 
 
 if __name__ == '__main__':
