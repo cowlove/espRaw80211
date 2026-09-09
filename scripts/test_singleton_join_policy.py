@@ -23,10 +23,19 @@ int main() {
     assert(mayAdopt(1, 2));
     assert(mayAdopt(1, 7));
     assert(!mayAdopt(2, 7)); // relaxed path stops after joining a group
-    assert(!mayPropose(1, 7)); // singleton path is separate
-    assert(!mayPropose(3, 3));
-    assert(!mayPropose(3, 2));
-    assert(mayPropose(3, 4));
+    assert(!mayPropose(1, 20, 7, 10)); // singleton path is separate
+    assert(mayPropose(2, 20, 2, 10));
+    assert(!mayPropose(2, 10, 2, 20));
+    assert(mayPropose(3, 20, 3, 10));
+    assert(!mayPropose(3, 10, 3, 20));
+    assert(mayPropose(4, 20, 4, 10));
+    assert(!mayPropose(4, 10, 4, 20));
+    assert(!mayPropose(3, 20, 2, 10));
+    assert(mayPropose(3, 20, 4, 30));
+    assert(groupPreferred(4, 30, 3, 20));
+    assert(groupPreferred(3, 10, 3, 20));
+    assert(!groupPreferred(3, 20, 3, 10));
+    assert(!groupPreferred(3, 20, 3, 20));
     assert(mayCoalesce(1, 1, 20, 10));
     assert(!mayCoalesce(1, 1, 10, 20));
     assert(!mayCoalesce(2, 1, 20, 10));

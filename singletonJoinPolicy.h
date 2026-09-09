@@ -26,10 +26,24 @@ inline bool mayCoalesce(size_t homeMembers, size_t destinationMembers,
         destinationBssid && destinationBssid < homeBssid;
 }
 
-// Established groups only consider a destination supported by direct positive
-// scout evidence, and only when that group is strictly larger.
-inline bool mayPropose(size_t homeMembers, size_t destinationMembers) {
-    return homeMembers >= 2 && destinationMembers > homeMembers;
+// Groups have one deterministic global ordering: larger membership wins, and
+// equal-sized groups choose the lower BSSID. This prevents equal established
+// groups from remaining deadlocked or moving in both directions.
+inline bool groupPreferred(size_t candidateMembers, uint64_t candidateBssid,
+                           size_t incumbentMembers, uint64_t incumbentBssid) {
+    if (!candidateBssid || candidateBssid == incumbentBssid) return false;
+    if (candidateMembers != incumbentMembers)
+        return candidateMembers > incumbentMembers;
+    return candidateBssid < incumbentBssid;
+}
+
+// Established groups consider destinations supported by positive direct
+// appointment evidence according to the shared group ordering.
+inline bool mayPropose(size_t homeMembers, uint64_t homeBssid,
+                       size_t destinationMembers, uint64_t destinationBssid) {
+    return homeMembers >= 2 &&
+        groupPreferred(destinationMembers, destinationBssid,
+                       homeMembers, homeBssid);
 }
 
 inline uint32_t proposalDelay(uint32_t homeCredibility) {

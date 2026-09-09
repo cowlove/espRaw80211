@@ -1036,16 +1036,20 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             commitHome(targetBssid);
             return;
         }
-        if (!SingletonJoinPolicy::mayPropose(homeMembers, targetMembers)) {
+        if (!SingletonJoinPolicy::mayPropose(homeMembers, homeBssid,
+                                             targetMembers, targetBssid)) {
+            const char *reason = targetMembers == homeMembers &&
+                targetBssid > homeBssid ? "equal-size-higher-bssid" :
+                "not-larger";
             if (spiffsProposalBeacon.read() == targetBssid) {
-                out("migration-proposal canceled target %012llx target-members %u home-members %u reason not-larger",
+                out("migration-proposal canceled target %012llx target-members %u home-members %u reason %s",
                     (unsigned long long)targetBssid, (unsigned)targetMembers,
-                    (unsigned)homeMembers);
+                    (unsigned)homeMembers, reason);
                 clearMigrationProposal();
             } else {
-                out("migration-rejected target %012llx target-members %u home-members %u reason not-larger",
+                out("migration-rejected target %012llx target-members %u home-members %u reason %s",
                     (unsigned long long)targetBssid, (unsigned)targetMembers,
-                    (unsigned)homeMembers);
+                    (unsigned)homeMembers, reason);
             }
             return;
         }
@@ -1059,7 +1063,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 (unsigned)homeMembers, spiffsProposalActRound.read());
             return;
         }
-        if (pending && targetMembers <= spiffsProposalMembers.read()) {
+        if (pending && !SingletonJoinPolicy::groupPreferred(
+                targetMembers, targetBssid,
+                spiffsProposalMembers.read(), pending)) {
             out("migration-rejected target %012llx target-members %u pending %012llx pending-members %u reason weaker-than-pending",
                 (unsigned long long)targetBssid, (unsigned)targetMembers,
                 (unsigned long long)pending, spiffsProposalMembers.read());
@@ -1087,7 +1093,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             return false;
         }
         const size_t homeMembers = listenerCount(homeBssid);
-        if (homeMembers >= spiffsProposalMembers.read()) {
+        if (!SingletonJoinPolicy::groupPreferred(
+                spiffsProposalMembers.read(), target,
+                homeMembers, homeBssid)) {
             out("migration-proposal canceled target %012llx target-snapshot %u home-members %u reason home-caught-up",
                 (unsigned long long)target, spiffsProposalMembers.read(),
                 (unsigned)homeMembers);

@@ -253,15 +253,21 @@ positive visitor evidence; missing traffic is never negative evidence.
 
 ## Established-member behavior
 
-A board with at least two estimated home members is established. It may propose
-a destination only when:
+A board with at least two estimated home members is established. Groups use a
+single deterministic ordering: larger estimated membership wins; if membership
+is equal, lower BSSID wins. A board may propose a destination when:
 
 ```text
 targetMembers > homeMembers
+or
+targetMembers == homeMembers && targetBssid < homeBssid
 ```
 
-Equal-size and smaller destinations are rejected. This strict inequality is
-the primary anti-fragmentation rule.
+Smaller destinations and equal-size higher-BSSID destinations are rejected.
+This creates one attractor for equal-size groups: only members of the
+higher-BSSID group may propose moving to the lower-BSSID group. Once one member
+moves, the resulting unequal sizes let the ordinary larger-group rule complete
+the merge.
 
 ### Creating a proposal
 
@@ -291,9 +297,9 @@ snapshot. It does **not** postpone the existing activation round.
 
 ### Seeing a different target
 
-If a proposal is already pending, a different target replaces it only if its
-current member estimate is greater than the pending proposal's stored estimate.
-An equally large or smaller alternative is rejected as `weaker-than-pending`.
+If a proposal is already pending, a different target replaces it only if it
+outranks the pending target under the same membership/BSSID ordering. Thus an
+equally large lower-BSSID target may replace a higher-BSSID target.
 
 ## Proposal commitment and cancellation
 
@@ -305,8 +311,9 @@ The checks occur in this order:
 
 1. **No proposal:** keep home.
 2. **Home changed since proposal:** cancel with `home-changed`.
-3. **Home now equals or exceeds the target snapshot:** cancel with
-   `home-caught-up`.
+3. **Home now outranks or equals the target snapshot:** cancel with
+   `home-caught-up`. Equal membership cancels only when the home BSSID is lower;
+   an equal lower-BSSID target remains eligible to commit.
 4. **Activation round not reached:** retain the proposal and keep home.
 5. **Activation round reached:** commit the stored target.
 
@@ -434,12 +441,14 @@ result: no migration evaluation and no negative membership conclusion
 - `singleton-coalesce`: a 1+1 encounter resolved toward the lower BSSID.
 - `visitor-positive-evidence`: a directly heard visitor advertised an eligible
   alternative home during this home appointment.
-- `migration-proposal visitor`: an established member proposed a larger group
-  learned from a visitor; confirmation is identical to a scout proposal.
+- `migration-proposal visitor`: an established member proposed a preferred
+  group learned from a visitor; confirmation is identical to a scout proposal.
 - `migration-proposal direct`: new proposal, group estimates, credibility, and
   activation round.
 - `migration-proposal refreshed`: same target seen again.
-- `migration-rejected ... not-larger`: destination is not strictly larger.
+- `migration-rejected ... not-larger`: destination has fewer members.
+- `migration-rejected ... equal-size-higher-bssid`: equal-size destination
+  loses the deterministic BSSID tie-break.
 - `migration-rejected ... weaker-than-pending`: an alternative does not beat
   the existing proposal snapshot.
 - `migration-proposal canceled ... home-caught-up`: incumbent group recovered.
@@ -465,12 +474,11 @@ The delayed commit compares a fresh home estimate against a stored target
 snapshot. The target may have changed during the delay. Requiring another
 positive scout before commitment would be safer but slower.
 
-### Larger equal partitions cannot deliberately merge
+### Equal partitions use the same deterministic ordering
 
-The deterministic lower-BSSID rule resolves 1+1 encounters safely. Strictly-
-larger migration still means two stable equal-size groups of two or more cannot
-deliberately resolve their tie. A broader deterministic tie-breaker would need
-additional safeguards against simultaneous group swaps.
+Equal-size established groups resolve toward the lower BSSID through the
+normal delayed proposal path. Because every board computes the same winner,
+the groups cannot simultaneously swap homes in opposite directions.
 
 ### Association capacity and freshness affect perceived size
 
@@ -508,7 +516,9 @@ on scout completion(target):
         commitHome(target)
         return
 
-    if homeN < 2 or targetN <= homeN:
+    targetPreferred = targetN > homeN or
+        (targetN == homeN and target < home)
+    if homeN < 2 or not targetPreferred:
         cancel proposal for target, if any
         return
 
@@ -516,7 +526,8 @@ on scout completion(target):
         refresh target snapshot without changing activation round
         return
 
-    if another proposal exists and targetN <= its snapshot:
+    if another proposal exists and target does not outrank it by
+       (member count, then lower BSSID):
         reject target
         return
 
@@ -538,7 +549,8 @@ on healthy full home completion(home):
 
     if proposal belongs to another home:
         cancel it
-    else if freshAssociationCount(home) >= proposal.targetSnapshot:
+    else if home outranks or equals the target snapshot by
+            (member count, then lower BSSID):
         cancel it
     else if current round >= proposal.activation:
         commitHome(proposal.target)
