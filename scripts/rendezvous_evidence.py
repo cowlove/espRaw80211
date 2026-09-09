@@ -146,10 +146,10 @@ def parse_evidence(data):
             # Serial output can occasionally concatenate the next TX record
             # without a newline. Preserve the RX record's leading identity
             # instead of allowing duplicate trailing fields to overwrite it.
-            identity = re.match(r'sender ([0-9a-f]+) incarnation ([0-9a-f]+)',
-                                clock_body)
-            if identity:
-                values['sender'], values['incarnation'] = identity.groups()
+            received_identity = re.match(
+                r'sender ([0-9a-f]+) incarnation ([0-9a-f]+)', clock_body)
+            if received_identity:
+                values['sender'], values['incarnation'] = received_identity.groups()
             current.received_clocks.append(values)
         found = APPOINTMENT.search(body)
         if found and (current.sequence is None or int(found[1]) == current.sequence):

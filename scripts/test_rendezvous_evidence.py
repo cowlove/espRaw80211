@@ -129,6 +129,17 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(cycles[0].received_clocks[0]['sender'], 'aaa')
         self.assertEqual(cycles[0].received_clocks[0]['incarnation'], 'a1')
 
+    def test_received_clock_does_not_replace_exchange_identity(self):
+        extra = (line(
+            '00006.0 report-clock-rx sender aaa incarnation a1 wake 1 packet 0 '
+            'local-rx 6000000 bssid abc valid 1 exchange 1') +
+            line('00007.0 ESP-NOW exchange phase started'))
+        cycles, partial = evidence.parse_evidence(
+            cycle(epoch='b2', extra=extra, wire=7))
+        self.assertEqual(len(cycles), 1)
+        self.assertEqual(partial, 1)
+        self.assertEqual(cycles[0].epoch, 'b2')
+
     def test_scout_pairwise_bandwidth_excludes_home_only(self):
         # Incarnations identify each board; clock samples map its wire origin.
         a_extra = (line('00006.0 report-clock-rx sender bbb incarnation bb wake 1 packet 0 local-rx 6000000 bssid abc valid 1 exchange 1') +
