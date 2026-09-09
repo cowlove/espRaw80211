@@ -166,8 +166,9 @@ The convergence marker's `time=` field is the clean-start convergence latency.
 No marker means that seed timed out without converging.
 
 Run the benchmark in parallel using all available processors. It defaults to
-200 seeds; use `--iterations` to override it. All other arguments are appended
-to the generated CSIM command line, so they override the benchmark defaults:
+200 seeds, 3,600 simulated seconds, and reception scale 0.60. The benchmark
+parses and reports overrides for those values. All other arguments are appended
+verbatim to the generated CSIM command line:
 
 ```sh
 ./scripts/csim-benchmark.sh

@@ -5,10 +5,12 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 runner="$script_dir/run_csim.sh"
 
 usage() {
-    echo "usage: $0 [--iterations N] [csim arguments...]" >&2
+    echo "usage: $0 [--iterations N] [--seconds N] [--reception-scale N] [csim arguments...]" >&2
 }
 
 iterations=200
+timeout_seconds=3600
+reception_scale=0.60
 csim_arguments=()
 while (( $# )); do
     case $1 in
@@ -19,6 +21,24 @@ while (( $# )); do
             ;;
         --iterations=*)
             iterations=${1#*=}
+            shift
+            ;;
+        --seconds)
+            if (( $# < 2 )); then usage; exit 2; fi
+            timeout_seconds=$2
+            shift 2
+            ;;
+        --seconds=*)
+            timeout_seconds=${1#*=}
+            shift
+            ;;
+        --reception-scale)
+            if (( $# < 2 )); then usage; exit 2; fi
+            reception_scale=$2
+            shift 2
+            ;;
+        --reception-scale=*)
+            reception_scale=${1#*=}
             shift
             ;;
         -h|--help)
@@ -35,8 +55,6 @@ if [[ ! $iterations =~ ^[0-9]+$ ]] || (( iterations < 1 )); then
     usage
     exit 2
 fi
-timeout_seconds=3600
-reception_scale=0.60
 jobs=$(nproc)
 
 results_dir=$(mktemp -d "${TMPDIR:-/tmp}/espRaw80211-benchmark.XXXXXX")
@@ -50,7 +68,7 @@ echo "CSIM first-convergence benchmark"
 echo "  runs: $iterations"
 echo "  parallel jobs: $jobs"
 echo "  simulated timeout: ${timeout_seconds}s"
-echo "  default reception scale: $reception_scale"
+echo "  reception scale: $reception_scale"
 if (( ${#csim_arguments[@]} )); then
     printf '  CSIM overrides:'
     printf ' %q' "${csim_arguments[@]}"
