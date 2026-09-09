@@ -1543,9 +1543,22 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 
     const BeaconInfo *freshTiming(uint64_t bssid, uint64_t now) const {
         for (const BeaconInfo &info : packetLog)
-            if (info.ssid == bssid && info.count && now >= info.seen2 &&
-                now-info.seen2 <= beaconSamplingWindowUsec) return &info;
+            // packetLog is rebuilt on every wake, so a captured packet is
+            // itself proof that this timing observation belongs to this wake.
+            if (info.ssid == bssid && info.count && now >= info.seen2)
+                return &info;
         return nullptr;
+    }
+
+    void dumpBeaconScanSummary() const {
+        const uint64_t now = steadyMicros();
+        for (const BeaconInfo &info : packetLog) {
+            if (!info.ssid || !info.count) continue;
+            const uint64_t age = now >= info.seen2 ? now - info.seen2 : 0;
+            out("@q b=%012llx r=%d n=%d a=%llu t=%llu",
+                (unsigned long long)info.ssid, info.rssi, info.count,
+                (unsigned long long)age, (unsigned long long)info.ts);
+        }
     }
 
     bool makeExecutionPlan(uint64_t now) {
@@ -1659,6 +1672,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         spiffsSleepTime = duration;
         spiffsClaimGeneration = wakeGeneration;
         out("deep sleep %.3f sec timing-recovery", duration / 1000000.0);
+        dumpBeaconScanSummary();
         fflush(stdout);
 #ifndef CSIM
         uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
@@ -1686,6 +1700,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     void maximumAwakeRestart() {
         out("maximum-awake restart after %.3f sec",
             (steadyMicros() - startUsec) / 1000000.0);
+        dumpBeaconScanSummary();
         fflush(stdout);
 #ifdef CSIM
         beaconCapture.stop();
@@ -1710,6 +1725,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         const uint64_t now = steadyMicros();
         duration = executionPlan.sleepUntilNext(now, beaconSamplingWindowUsec + 500000);
         if (duration < 1000000) return;
+        dumpBeaconScanSummary();
         spiffsRoundElapsed = roundClock.remainder + (now-roundClock.last) + duration;
         spiffsSleepTime = duration;
         spiffsClaimGeneration = wakeGeneration;
@@ -1730,6 +1746,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         }
         if (!spiffsIncarnation.read()) {
             saveClaims(); saveAssociations(); saveOrigins();
+            dumpBeaconScanSummary();
             beaconCapture.stop();
             esp_sleep_enable_timer_wakeup(1000);
             esp_deep_sleep_start();
@@ -1910,6 +1927,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             // Test reset changes incarnation in the next setup; restart through
             // deep sleep without pretending a normal appointment caused it.
             saveClaims(); saveAssociations(); saveOrigins();
+            dumpBeaconScanSummary();
             beaconCapture.stop();
             esp_sleep_enable_timer_wakeup(1000);
             esp_deep_sleep_start();

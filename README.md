@@ -178,8 +178,11 @@ Firmware output defaults to compact, line-oriented ASCII diagnostics. Human
 status and decision records remain descriptive; repeated exchange details use
 short `@` records (`@i` identity, `@e` exchange boundary, `@d` appointment,
 `@b` beacon clock, `@r`/`@t` radio clock, `@l` plan, `@x` counters, `@p` peer,
-and `@a` association summary). Historical verbose logs remain supported by the
-analyzer. Verify both encodings produce identical analysis with:
+`@a` association summary, and `@q` end-of-wake beacon scan). Each `@q` record
+contains BSSID `b`, average RSSI `r`, current-wake packet count `n`, age of the
+last observation in microseconds `a`, and the beacon TSF clock `t`. Historical
+verbose logs remain supported by the analyzer. Verify both encodings produce
+identical analysis with:
 
 ```sh
 ./scripts/test_csim_log_compatibility.sh

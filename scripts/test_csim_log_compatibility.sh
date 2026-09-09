@@ -28,6 +28,12 @@ mkdir "$workspace/legacy" "$workspace/compact"
 "$script_dir/run_csim.sh" --seconds 360 --random-seed 41 \
     > "$workspace/compact/all.log" 2>/dev/null
 
+if ! grep -Eq '@q b=[0-9a-f]{12} r=-?[0-9]+ n=[1-9][0-9]* a=[0-9]+ t=[0-9]+' \
+        "$workspace/compact/all.log"; then
+    echo 'compact CSIM log is missing a valid end-of-wake @q beacon record' >&2
+    exit 1
+fi
+
 split_and_analyze "$workspace/legacy"
 split_and_analyze "$workspace/compact"
 
