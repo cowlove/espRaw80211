@@ -27,6 +27,10 @@ int main() {
     assert(!mayPropose(3, 3));
     assert(!mayPropose(3, 2));
     assert(mayPropose(3, 4));
+    assert(mayCoalesce(1, 1, 20, 10));
+    assert(!mayCoalesce(1, 1, 10, 20));
+    assert(!mayCoalesce(2, 1, 20, 10));
+    assert(!mayCoalesce(1, 2, 20, 10));
     assert(proposalDelay(0)==2);
     assert(proposalDelay(3)==2);
     assert(proposalDelay(4)==3);

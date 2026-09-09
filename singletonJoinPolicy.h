@@ -17,6 +17,15 @@ inline bool mayAdopt(size_t homeMembers, size_t destinationMembers) {
     return homeMembers == 1 && destinationMembers >= 2;
 }
 
+// Two directly encountered singleton groups would otherwise reject one
+// another forever as equal-sized. Both sides independently choose the lower
+// BSSID, so exactly the singleton on the higher BSSID moves.
+inline bool mayCoalesce(size_t homeMembers, size_t destinationMembers,
+                        uint64_t homeBssid, uint64_t destinationBssid) {
+    return homeMembers == 1 && destinationMembers == 1 && homeBssid &&
+        destinationBssid && destinationBssid < homeBssid;
+}
+
 // Established groups only consider a destination supported by direct positive
 // scout evidence, and only when that group is strictly larger.
 inline bool mayPropose(size_t homeMembers, size_t destinationMembers) {

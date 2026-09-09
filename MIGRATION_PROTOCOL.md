@@ -140,10 +140,14 @@ This creates an important distinction:
 Home appointments are planned first. A scout can be added only when it fits the
 awake-time budget and does not displace the home appointment.
 
-Scouting is considered every two logical rounds. Eligible non-home beacons are
-ordered deterministically by BSSID, and a persistent cursor rotates through
-them so the lowest BSSID is not selected forever. Overlapping or nearby radio
-windows may be merged into one awake interval.
+Scouting is considered every two logical rounds. Each eligible non-home beacon
+gets one selection ticket. When an established group has fresh association
+evidence that a locally visible beacon contains exactly one member, that
+beacon gets one additional ticket. The resulting weighted random choice keeps
+every destination discoverable while gently favoring visits that can carry a
+larger-group invitation to an isolated board. It adds no new progression or
+persistent targeting state. Overlapping or nearby radio windows may be merged
+into one awake interval.
 
 The scheduler may discover that an appointment has already partly elapsed when
 it builds or enters the interval. Such an appointment is partial (`full 0`),
@@ -161,6 +165,9 @@ complete scout appointment
     |
     +-- positive direct target packet(s)
             -> estimate homeMembers and targetMembers from fresh associations
+               |
+               +-- both estimates == 1 and target BSSID is lower
+               |       -> commit immediately (deterministic 1+1 merge)
                |
                +-- homeMembers == 1 and targetMembers >= 2
                |       -> commit immediately (singleton join)
@@ -187,18 +194,23 @@ packet evidence is the gate; coverage remains diagnostic context.
 
 A board is treated as a singleton when its fresh home listener count is exactly
 one. It immediately adopts a scout target when the target listener count is at
-least two.
+least two. Two directly encountered singleton groups use lowest BSSID as a
+deterministic tie-break: the board on the higher home moves and the board on
+the lower home stays.
 
 ```text
 homeMembers == 1 && targetMembers >= 2 -> commitHome(target)
+homeMembers == 1 && targetMembers == 1 && target < home -> commitHome(target)
 ```
 
 There is no credibility delay or proposal period for this case. Once the board
 moves, it normally ceases to be a singleton, so the relaxed rule no longer
 applies.
 
-The rule intentionally does not allow singleton-to-singleton movement. Such a
-move would not improve coalescence and could create oscillation.
+Because both boards compute the same winning BSSID, the 1+1 exception creates
+a two-board group without oscillation. It closes the deadlock in which every
+board initializes on a different beacon and all encounters are otherwise
+rejected as equal-sized.
 
 ### Visitor evidence at home
 
@@ -209,7 +221,8 @@ A visitor target must:
 
 - be advertised by a directly heard visitor;
 - differ from the board's current home;
-- have at least two fresh associated members; and
+- have at least one fresh associated member (two for ordinary singleton
+  adoption, or one when the deterministic 1+1 tie-break selects it); and
 - remain locally visible, eligible, and supported by fresh beacon timing.
 
 If several visitors advertise eligible destinations, the board chooses the
@@ -399,6 +412,10 @@ result: no migration evaluation and no negative membership conclusion
 - `singleton-join direct`: immediate singleton adoption.
 - `singleton-join visitor`: immediate adoption of a group advertised by a
   visitor during the singleton's home appointment.
+- `singleton-coalesce`: a 1+1 encounter resolved toward the lower BSSID.
+- `scout-weighted`: a scout selection made while one or more fresh rumored
+  singleton targets were eligible; reports whether the selected target had
+  the additional ticket.
 - `visitor-positive-evidence`: a directly heard visitor advertised an eligible
   alternative home during this home appointment.
 - `migration-proposal visitor`: an established member proposed a larger group
@@ -432,11 +449,12 @@ The delayed commit compares a fresh home estimate against a stored target
 snapshot. The target may have changed during the delay. Requiring another
 positive scout before commitment would be safer but slower.
 
-### Equal partitions cannot deliberately merge
+### Larger equal partitions cannot deliberately merge
 
-Strictly-larger migration prevents fragmentation, but two stable equal-size
-groups cannot resolve their tie through this rule. A deterministic tie breaker
-would need safeguards against simultaneous swaps.
+The deterministic lower-BSSID rule resolves 1+1 encounters safely. Strictly-
+larger migration still means two stable equal-size groups of two or more cannot
+deliberately resolve their tie. A broader deterministic tie-breaker would need
+additional safeguards against simultaneous group swaps.
 
 ### Association capacity and freshness affect perceived size
 
