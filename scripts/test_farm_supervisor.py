@@ -41,7 +41,9 @@ def load_datasets(log_dir, remote_host, remote_dir, local_boards, remote_boards,
     return datasets
 
 
-def convergence_snapshot(datasets, now, required, max_age):
+def convergence_snapshot(datasets, now, required, max_age,
+                         observation_floors=None):
+    observation_floors = observation_floors or {}
     if len(datasets) != required:
         return None, f'expected {required} logs, found {len(datasets)}'
     homes = set()
@@ -50,6 +52,8 @@ def convergence_snapshot(datasets, now, required, max_age):
         home, observed = latest.get('home'), latest.get('host_time')
         if not home or home == '-' or observed is None:
             return None, f'{name} has no current home observation'
+        if observed <= observation_floors.get(name, float('-inf')):
+            return None, f'{name} awaiting post-epoch home observation'
         age = now - observed
         if age < -5 or age > max_age:
             return None, f'{name} latest observation age {age:.1f}s'
@@ -60,12 +64,12 @@ def convergence_snapshot(datasets, now, required, max_age):
 
 
 def epoch_acknowledgments(datasets, request_time):
-    acknowledged = set()
+    acknowledged = {}
     for name, data in datasets:
         for _, _, wall, body in evidence.records(data):
             if (wall is not None and wall >= request_time - 2 and
                     'TEST EPOCH RESET ' in body):
-                acknowledged.add(name)
+                acknowledged[name] = max(wall, acknowledged.get(name, wall))
     return acknowledged
 
 
@@ -141,6 +145,7 @@ def main():
     candidate_since = None
     reset_time = None
     reset_token = None
+    observation_floors = {}
     last_status = None
     print(f'test-farm supervisor started boards={required} poll={args.poll_seconds:g}s '
           f'sustain={args.sustain_seconds:g}s freshness={args.freshness_seconds:g}s',
@@ -159,6 +164,7 @@ def main():
                 last_status = status
             if len(acknowledged) == required:
                 print(f'reset id={reset_token} complete; monitoring new epoch', flush=True)
+                observation_floors = acknowledged
                 reset_time = reset_token = None
                 candidate_home = candidate_since = None
                 last_status = None
@@ -169,7 +175,8 @@ def main():
             continue
 
         home, reason = convergence_snapshot(
-            datasets, now, required, args.freshness_seconds)
+            datasets, now, required, args.freshness_seconds,
+            observation_floors)
         if home is None:
             if reason != last_status:
                 print(f'not converged: {reason}', flush=True)

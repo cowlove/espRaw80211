@@ -60,10 +60,20 @@ class InfrastructureTests(unittest.TestCase):
             b'2026-09-09T10:00:00+00:00 host_mono_ns=1 board=usb0 port=p session=s | TEST EPOCH RESET reason=cold delay-usec=60000000\n'
         )
         marker = supervisor.evidence.timestamp('2026-09-09T10:00:00+00:00')
+        self.assertEqual(set(supervisor.epoch_acknowledgments(
+            [('usb0', data)], marker - 1)), {'usb0'})
         self.assertEqual(supervisor.epoch_acknowledgments([('usb0', data)],
-                                                          marker - 1), {'usb0'})
-        self.assertEqual(supervisor.epoch_acknowledgments([('usb0', data)],
-                                                          marker + 5), set())
+                                                          marker + 5), {})
+
+    def test_supervisor_rejects_pre_epoch_home_observation(self):
+        now = 1_800_000_000
+        datasets = [('usb0', b'data')]
+        summary = {'latest': {'home': 'abc', 'host_time': now - 10}}
+        with patch.object(supervisor.evidence, 'summarize', return_value=summary):
+            home, reason = supervisor.convergence_snapshot(
+                datasets, now, 1, 180, {'usb0': now - 5})
+        self.assertIsNone(home)
+        self.assertEqual(reason, 'usb0 awaiting post-epoch home observation')
 
     def test_prefixed_cycle_matches_legacy(self):
         lines = ['00005.0 ESP-NOW exchange phase started',
