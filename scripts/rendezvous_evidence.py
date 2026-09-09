@@ -6,8 +6,11 @@ import re
 
 PREFIX = re.compile(r'^(\S+) host_mono_ns=(\d+) board=(\S+) port=(\S+) session=(\S+) \| (.*)$')
 IDENTITY = re.compile(r'report-identity incarnation ([0-9a-f]+) wake (\d+) wire-version (\d+)(?: exchange (\d+))?')
+COMPACT_IDENTITY = re.compile(r'@i e=([0-9a-f]+) w=(\d+) v=(\d+)(?: x=(\d+))?')
 WINDOW = re.compile(r'beacon-clock target ([0-9a-f]+) tsf-packet (\d+) exchange (\d+)-(\d+)')
+COMPACT_WINDOW = re.compile(r'@b b=([0-9a-f]+) t=(\d+) s=(\d+) e=(\d+)')
 APPOINTMENT = re.compile(r'appointment complete exchange (\d+) kind (home|scout) target ([0-9a-f]+) full (\d+) healthy (\d+)')
+COMPACT_APPOINTMENT = re.compile(r'@d x=(\d+) k=(home|scout) b=([0-9a-f]+) f=(\d+) h=(\d+)')
 SCAN_OBSERVED = re.compile(
     r'matrix scan-observed beacon ([0-9a-f]+) packets (\d+) '
     r'span ([0-9.]+) sec .*?rssi avg (-?\d+) min (-?\d+) max (-?\d+) '
@@ -103,18 +106,18 @@ def parse_evidence(data):
             current = None
             identity = (None, None, None, None)
             previous_session = session
-        found = IDENTITY.search(body)
+        found = IDENTITY.search(body) or COMPACT_IDENTITY.search(body)
         if found:
             partial += current is not None
             current = None
             epoch, wake, wire, sequence = found.groups()
             identity = (epoch, int(wake), int(wire), int(sequence) if sequence else None)
-        if 'ESP-NOW exchange phase started' in body:
+        if 'ESP-NOW exchange phase started' in body or '@e begin=' in body:
             partial += current is not None
             current = Exchange(session, identity[0], identity[1], wall, identity[2], identity[3])
         if current is None:
             continue
-        found = WINDOW.search(body)
+        found = WINDOW.search(body) or COMPACT_WINDOW.search(body)
         if found and current.wire is not None and current.wire >= 5:
             bssid, _, start, end = found.groups()
             if int(end) >= int(start):
@@ -163,18 +166,30 @@ def parse_evidence(data):
             values = {names[key]: value for key, value in compact.items()
                       if key in names}
             current.peers[values['origin']] = values
-        if 'report-clock-rx sender ' in body:
-            clock_body = body.split('report-clock-rx ', 1)[1]
-            values = fields(clock_body)
+        if 'report-clock-rx sender ' in body or '@r ' in body:
+            compact_clock = '@r ' in body
+            clock_body = body.split('@r ' if compact_clock else
+                                    'report-clock-rx ', 1)[1]
+            values = fields(clock_body) if not compact_clock else {}
             # Serial output can occasionally concatenate the next TX record
             # without a newline. Preserve the RX record's leading identity
             # instead of allowing duplicate trailing fields to overwrite it.
-            received_identity = re.match(
-                r'sender ([0-9a-f]+) incarnation ([0-9a-f]+)', clock_body)
-            if received_identity:
-                values['sender'], values['incarnation'] = received_identity.groups()
+            if compact_clock:
+                compact = dict(re.findall(r'([a-z]+)=([^ ]+)', clock_body))
+                names = {'s': 'sender', 'i': 'incarnation', 'w': 'wake',
+                         'p': 'packet', 'lr': 'local-rx', 'b': 'bssid',
+                         'c': 'clock-ms-low', 'sd': 'start-delta-ms',
+                         'ed': 'planned-end-delta-ms', 'v': 'valid',
+                         'x': 'exchange'}
+                values = {names[key]: value for key, value in compact.items()
+                          if key in names}
+            else:
+                received_identity = re.match(
+                    r'sender ([0-9a-f]+) incarnation ([0-9a-f]+)', clock_body)
+                if received_identity:
+                    values['sender'], values['incarnation'] = received_identity.groups()
             current.received_clocks.append(values)
-        found = APPOINTMENT.search(body)
+        found = APPOINTMENT.search(body) or COMPACT_APPOINTMENT.search(body)
         if found and (current.sequence is None or int(found[1]) == current.sequence):
             current.appointment_kinds.add(found[2])
             current.appointment_targets.add(found[3])
@@ -190,7 +205,8 @@ def parse_evidence(data):
                 'rssi': int(average), 'minimum_rssi': int(minimum),
                 'maximum_rssi': int(maximum), 'eligible': eligible == 'yes',
             })
-        if 'deep sleep ' in body or 'exchange complete interval ' in body:
+        if ('deep sleep ' in body or 'exchange complete interval ' in body or
+                '@e end=' in body):
             current.end_wall = wall
             complete.append(current)
             current = None

@@ -67,11 +67,13 @@ def parse(data: bytes, limit: int) -> list[Cycle]:
         if not m:
             continue
         t = float(m.group(1))
-        if START in line:
+        if START in line or '@e begin=' in line:
             if current is not None:
                 current = None
             current = Cycle(t, t, capture=capture)
-        elif current is not None and (END in line or 'exchange complete interval ' in line):
+        elif current is not None and (END in line or
+                                      'exchange complete interval ' in line or
+                                      '@e end=' in line):
             current.end = t
             if current.end >= current.start:
                 cycles.append(current)

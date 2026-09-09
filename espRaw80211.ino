@@ -1150,14 +1150,30 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         if (header.senderMac == deviceMac ||
             !acceptOrigin(header.senderMac, header.incarnation, true)) return;
         // One sample per peer per exchange keeps serial output bounded.
-        if (peerSlot >= 0 && reportSenderValid[peerSlot] == 0)
-        out("report-clock-rx sender %012llx incarnation %08x wake %u packet %u local-rx %llu bssid %012llx clock-ms-low %u start-delta-ms %d planned-end-delta-ms %d valid %u exchange %u",
-            (unsigned long long)header.senderMac, header.incarnation,
-            header.wakeGeneration, header.packetSequence,
-            (unsigned long long)reportLocalRx,
-            (unsigned long long)reportClockBssid(header), header.clockMsLow,
-            (int)header.exchangeStartDeltaMs, (int)header.plannedEndDeltaMs,
-            header.timingValid == 1 ? 1U : 0U, header.exchangeSequence);
+        if (peerSlot >= 0 && reportSenderValid[peerSlot] == 0) {
+#ifdef CSIM
+            if (csimLegacyDiagnostics)
+                out("report-clock-rx sender %012llx incarnation %08x wake %u packet %u local-rx %llu bssid %012llx clock-ms-low %u start-delta-ms %d planned-end-delta-ms %d valid %u exchange %u",
+                    (unsigned long long)header.senderMac, header.incarnation,
+                    header.wakeGeneration, header.packetSequence,
+                    (unsigned long long)reportLocalRx,
+                    (unsigned long long)reportClockBssid(header), header.clockMsLow,
+                    (int)header.exchangeStartDeltaMs,
+                    (int)header.plannedEndDeltaMs,
+                    header.timingValid == 1 ? 1U : 0U,
+                    header.exchangeSequence);
+            else
+#endif
+                out("@r s=%012llx i=%08x w=%u p=%u lr=%llu b=%012llx c=%u sd=%d ed=%d v=%u x=%u",
+                    (unsigned long long)header.senderMac, header.incarnation,
+                    header.wakeGeneration, header.packetSequence,
+                    (unsigned long long)reportLocalRx,
+                    (unsigned long long)reportClockBssid(header), header.clockMsLow,
+                    (int)header.exchangeStartDeltaMs,
+                    (int)header.plannedEndDeltaMs,
+                    header.timingValid == 1 ? 1U : 0U,
+                    header.exchangeSequence);
+        }
         const bool refreshed = mergeAssociation(header.senderMac, header.selectedBeacon,
                          header.wakeGeneration, 0, true, header.incarnation);
         if (peerSlot >= 0 && refreshed) reportSenderAssociationRefresh[peerSlot]++;
@@ -1347,11 +1363,24 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             if (info.ssid != targetBeacon || info.count == 0) continue;
             setReportTiming(header, info.ssid, info.ts, info.seen2,
                             espNowStartUsec, espNowEndUsec);
-            if (header.packetSequence == 0)
-            out("report-clock-tx incarnation %08x wake %u packet %u bssid %012llx tsf %llu local-rx %llu valid %u",
-                incarnation, wakeGeneration, header.packetSequence,
-                (unsigned long long)info.ssid, (unsigned long long)info.ts,
-                (unsigned long long)info.seen2, (unsigned)header.timingValid);
+            if (header.packetSequence == 0) {
+#ifdef CSIM
+                if (csimLegacyDiagnostics)
+                    out("report-clock-tx incarnation %08x wake %u packet %u bssid %012llx tsf %llu local-rx %llu valid %u",
+                        incarnation, wakeGeneration, header.packetSequence,
+                        (unsigned long long)info.ssid,
+                        (unsigned long long)info.ts,
+                        (unsigned long long)info.seen2,
+                        (unsigned)header.timingValid);
+                else
+#endif
+                    out("@t i=%08x w=%u p=%u b=%012llx t=%llu lr=%llu v=%u",
+                        incarnation, wakeGeneration, header.packetSequence,
+                        (unsigned long long)info.ssid,
+                        (unsigned long long)info.ts,
+                        (unsigned long long)info.seen2,
+                        (unsigned)header.timingValid);
+            }
             break;
         }
         memcpy(buffer, &header, sizeof(header));
@@ -1606,9 +1635,20 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         executionPlanned = true;
         spiffsTimingRecovery = (uint32_t)0;
         spiffsStrongestRecovery = 0;
-        out("interval-plan home %012llx appointments %u intervals %u awake-usec %llu",
-            (unsigned long long)home, (unsigned)executionPlan.appointmentCount(),
-            (unsigned)executionPlan.intervalCount(), (unsigned long long)executionPlan.awakeUsec());
+#ifdef CSIM
+        if (csimLegacyDiagnostics)
+            out("interval-plan home %012llx appointments %u intervals %u awake-usec %llu",
+                (unsigned long long)home,
+                (unsigned)executionPlan.appointmentCount(),
+                (unsigned)executionPlan.intervalCount(),
+                (unsigned long long)executionPlan.awakeUsec());
+        else
+#endif
+            out("@l h=%012llx a=%u i=%u u=%llu",
+                (unsigned long long)home,
+                (unsigned)executionPlan.appointmentCount(),
+                (unsigned)executionPlan.intervalCount(),
+                (unsigned long long)executionPlan.awakeUsec());
         return true;
     }
 
@@ -1742,10 +1782,22 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 #ifdef CSIM
             CsimPairwiseModel::beginWindow(deviceMac, exchangeSequence);
 #endif
-            out("report-identity incarnation %08x wake %u wire-version 7 exchange %u",
-                incarnation, wakeGeneration, exchangeSequence);
-            out("ESP-NOW exchange phase started interval %u planned %llu-%llu",
-                exchangeSequence, (unsigned long long)interval.start, (unsigned long long)interval.end);
+#ifdef CSIM
+            if (csimLegacyDiagnostics) {
+                out("report-identity incarnation %08x wake %u wire-version 7 exchange %u",
+                    incarnation, wakeGeneration, exchangeSequence);
+                out("ESP-NOW exchange phase started interval %u planned %llu-%llu",
+                    exchangeSequence, (unsigned long long)interval.start,
+                    (unsigned long long)interval.end);
+            } else
+#endif
+            {
+                out("@i e=%08x w=%u v=7 x=%u", incarnation,
+                    wakeGeneration, exchangeSequence);
+                out("@e begin=%u s=%llu e=%llu", exchangeSequence,
+                    (unsigned long long)interval.start,
+                    (unsigned long long)interval.end);
+            }
         }
         for (size_t i = 0; i < executionPlan.appointmentCount(); ++i) {
             if (!(interval.appointments & (1ULL << i))) continue;
@@ -1761,9 +1813,18 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 state.finished = true;
                 const bool healthy = state.healthy(privMux.getSendSuccesses(), reportValidRxCount) &&
                     privMux.getSendFailures()-coverageFailures[i] <= 5;
-                out("appointment complete exchange %u kind %s target %012llx full %u healthy %u",
-                    exchangeSequence, a.home ? "home" : "scout",
-                    (unsigned long long)a.bssid, state.full ? 1U : 0U, healthy ? 1U : 0U);
+#ifdef CSIM
+                if (csimLegacyDiagnostics)
+                    out("appointment complete exchange %u kind %s target %012llx full %u healthy %u",
+                        exchangeSequence, a.home ? "home" : "scout",
+                        (unsigned long long)a.bssid,
+                        state.full ? 1U : 0U, healthy ? 1U : 0U);
+                else
+#endif
+                    out("@d x=%u k=%s b=%012llx f=%u h=%u",
+                        exchangeSequence, a.home ? "home" : "scout",
+                        (unsigned long long)a.bssid,
+                        state.full ? 1U : 0U, healthy ? 1U : 0U);
                 if (a.home && spiffsBeacon.read() == a.bssid) {
                     updateHomeCredibility(a.bssid, healthy, state.full);
                     if (healthy && state.full)
@@ -1810,9 +1871,20 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         uint64_t projectedStart = 0, projectedEnd = 0;
         if (timing && projectBeaconTsf(timing->ts, timing->seen2, espNowStartUsec, projectedStart) &&
             projectBeaconTsf(timing->ts, timing->seen2, espNowEndUsec, projectedEnd))
-            out("beacon-clock target %012llx tsf-packet %llu exchange %llu-%llu",
-                (unsigned long long)targetBeacon, (unsigned long long)timing->ts,
-                (unsigned long long)projectedStart, (unsigned long long)projectedEnd);
+#ifdef CSIM
+            if (csimLegacyDiagnostics)
+                out("beacon-clock target %012llx tsf-packet %llu exchange %llu-%llu",
+                    (unsigned long long)targetBeacon,
+                    (unsigned long long)timing->ts,
+                    (unsigned long long)projectedStart,
+                    (unsigned long long)projectedEnd);
+            else
+#endif
+                out("@b b=%012llx t=%llu s=%llu e=%llu",
+                    (unsigned long long)targetBeacon,
+                    (unsigned long long)timing->ts,
+                    (unsigned long long)projectedStart,
+                    (unsigned long long)projectedEnd);
         const uint64_t home = spiffsBeacon.read();
         const bool transportHealthy = reportValidRxCount >= 3 &&
             privMux.getSendSuccesses()-intervalOkStart >= 20;
@@ -1822,7 +1894,12 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             reportRxCount, reportValidRxCount, reportSenderCount);
         dumpExchangePeers();
         dumpAssociationTable(home);
-        out("exchange complete interval %u", exchangeSequence);
+#ifdef CSIM
+        if (csimLegacyDiagnostics)
+            out("exchange complete interval %u", exchangeSequence);
+        else
+#endif
+            out("@e end=%u", exchangeSequence);
 #ifdef CSIM
         CsimPairwiseModel::endWindow(deviceMac);
 #endif
@@ -2038,8 +2115,13 @@ public:
             spiffsRoundHealthy = 0;
             spiffsTestSwarmCount = testClusterSize;
         }
-        out("artificial-test-swarm boards %u (includes unlogged boards; not production knowledge)",
-            (unsigned)testClusterSize);
+#ifdef CSIM
+        if (csimLegacyDiagnostics)
+            out("artificial-test-swarm boards %u (includes unlogged boards; not production knowledge)",
+                (unsigned)testClusterSize);
+        else
+#endif
+            out("@s test-boards=%u", (unsigned)testClusterSize);
         loadOrigins();
         loadClaims();
         loadAssociations();
@@ -2059,8 +2141,13 @@ public:
         }
         spiffsClaimGeneration = wakeGeneration;
         acceptOrigin(deviceMac, incarnation, true);
-        out("report-identity incarnation %08x wake %u wire-version 7 max-packet-bytes 180",
-            incarnation, wakeGeneration);
+#ifdef CSIM
+        if (csimLegacyDiagnostics)
+            out("report-identity incarnation %08x wake %u wire-version 7 max-packet-bytes 180",
+                incarnation, wakeGeneration);
+        else
+#endif
+            out("@i e=%08x w=%u v=7 max=180", incarnation, wakeGeneration);
         const uint64_t homeBeacon = spiffsBeacon.read();
         targetBeacon = homeBeacon;
         scoutWake = false;
