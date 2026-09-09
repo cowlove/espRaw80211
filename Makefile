@@ -7,7 +7,7 @@ CHIP=esp32
 BUILD_MEMORY_TYPE=qio_qspi
 BUILD_EXTRA_FLAGS += -DI2S
 ALIBS=${HOME}/Arduino/libraries
-EXCLUDE_DIRS=${ALIBS}/lvgl|${ALIBS}/LovyanGFX|${ALIBS}/esp32csim|${ALIBS}/PubSubClient/tests
+EXCLUDE_DIRS=${ALIBS}/lvgl|${ALIBS}/LovyanGFX|${ALIBS}/U8g2|${ALIBS}/esp32csim|${ALIBS}/PubSubClient/tests
 GIT_VERSION := "$(shell git describe --abbrev=4 --dirty --always --tags)"
 BUILD_EXTRA_FLAGS += -DGIT_VERSION=\"$(GIT_VERSION)\"
 BUILD_EXTRA_FLAGS += -DESP32CORE_V2
