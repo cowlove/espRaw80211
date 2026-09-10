@@ -42,6 +42,16 @@ inline bool nextAppointment(uint64_t bssid, uint64_t beaconTsf,
     return true;
 }
 
+// Return a bounded sleep that wakes stutterLead before an absolute local
+// exchange boundary. The boundary is used only in this boot; the following
+// boot obtains a new direct beacon observation before its final sleep.
+inline bool stutterSleepUntil(uint64_t now, uint64_t boundary,
+                              uint64_t stutterLead, uint64_t &sleep) {
+    if (boundary <= now || boundary - now <= stutterLead) return false;
+    sleep = boundary - now - stutterLead;
+    return sleep != 0;
+}
+
 // Pure bounded planner; no allocation, radio calls, persistence or sleep.
 // Construct all required home appointments BEFORE attempting optional scouts.
 // A failed required addition invalidates the plan: never execute a partial

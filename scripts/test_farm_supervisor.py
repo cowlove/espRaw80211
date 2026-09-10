@@ -25,6 +25,11 @@ from test_swarm_config import swarm_board_count
 DEFAULT_STATUS_LOG = Path(__file__).resolve().parents[1] / 'test-farm-supervisor.log'
 status_log = None
 FOREIGN_MAC = 'e072a1a23784'
+# A board can complete its home observation anywhere in a 120-second cycle;
+# retain one cycle plus 60 seconds for host/logger delivery before declaring it
+# stale. This is a cadence relationship, not a separate protocol timeout.
+NOMINAL_RENDEZVOUS_SECONDS = 120
+DEFAULT_FRESHNESS_SECONDS = NOMINAL_RENDEZVOUS_SECONDS + 60
 
 
 def timestamped(message, now=None):
@@ -219,7 +224,8 @@ def main():
     parser.add_argument('--remote-dir', default='~/src/espRaw80211')
     parser.add_argument('--poll-seconds', type=float, default=15)
     parser.add_argument('--sustain-seconds', type=float, default=120)
-    parser.add_argument('--freshness-seconds', type=float, default=180)
+    parser.add_argument('--freshness-seconds', type=float,
+                        default=DEFAULT_FRESHNESS_SECONDS)
     parser.add_argument('--ack-timeout-seconds', type=float, default=180)
     parser.add_argument('--local-boards', default='0,1,2,3,4')
     parser.add_argument('--remote-boards', default='0,1')

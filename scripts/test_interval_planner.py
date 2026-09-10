@@ -101,6 +101,10 @@ int main() {
     assert(a.start==7 && a.end==10 && a.late);
     assert(nextAppointment(1,0,0,10,30,5,5,true,a));
     assert(a.start==35 && a.end==40 && !a.late);
+    uint64_t stutter = 0;
+    assert(stutterSleepUntil(10,130,60,stutter) && stutter == 60);
+    assert(!stutterSleepUntil(10,70,60,stutter));
+    assert(!stutterSleepUntil(70,70,60,stutter));
     // A shared nonzero phase stays exact in beacon-clock coordinates.
     assert(nextAppointment(1,30000000,0,4500000,30000000,5000000,5000000,true,a));
     assert(a.start==5000000 && a.end==10000000 && !a.late);

@@ -81,7 +81,7 @@ Each normal cycle has these conceptual stages:
 5. **Persistence and sleep:** save observations and sleep to the next
    rendezvous.
 
-The nominal rendezvous goal is 30 seconds. The obsolete fivefold period
+The nominal rendezvous goal is 120 seconds. The obsolete fivefold period
 increase after 50 cycles has been removed; a long interval in an old log may
 be historical state from that experiment, not current behavior.
 

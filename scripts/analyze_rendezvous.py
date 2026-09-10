@@ -226,7 +226,15 @@ def human_age(seconds: float) -> str:
     return f"{seconds}s"
 
 
-def global_home_convergences(datasets, required: int, max_skew: float = 90):
+# One full 120-second rendezvous cycle plus a 60-second host/log margin. Keep
+# this tied to cadence; a fixed 90-second skew made all-board observations
+# spuriously impossible after the period grew beyond 90 seconds.
+NOMINAL_RENDEZVOUS_SECONDS = 120
+DEFAULT_OBSERVATION_SKEW_SECONDS = NOMINAL_RENDEZVOUS_SECONDS + 60
+
+
+def global_home_convergences(datasets, required: int,
+                             max_skew: float = DEFAULT_OBSERVATION_SKEW_SECONDS):
     """Return transitions where every logged board's recent home agrees.
 
     This is an observational test oracle. It does not use listener counts and
@@ -260,7 +268,8 @@ def global_home_convergences(datasets, required: int, max_skew: float = 90):
     return events
 
 
-def reset_recovery_events(datasets, required: int, max_skew: float = 90):
+def reset_recovery_events(datasets, required: int,
+                          max_skew: float = DEFAULT_OBSERVATION_SKEW_SECONDS):
     """Find observable recovery events from largest-group transitions.
 
     A recovery event is a transition from a largest same-BSSID group smaller
@@ -345,7 +354,7 @@ def print_reset_recovery(datasets, required: int) -> None:
 
 
 def epoch_recovery_events(datasets, required: int, marker_skew: float = 15,
-                          observation_skew: float = 90):
+                          observation_skew: float = DEFAULT_OBSERVATION_SKEW_SECONDS):
     """Measure complete cold-reset epochs to the next observed consensus."""
     markers = []
     observations = []

@@ -30,6 +30,26 @@ Implementation readiness: the intended changes are bounded warm-up scheduling
 and compact timing observability.  No new clock phase, per-packet gate, or
 special merged-window state machine is required.
 
+### Long-sleep stutter refinement (2026-09-10)
+
+The nominal test rendezvous period is now 120 seconds. Policy freshness and
+qualification use logical wake cycles, not wall-clock seconds, so this change
+does not alter their meaning. Fixed physical durations remain deliberate:
+five seconds for normal beacon acquisition and exchange, 500ms ESP-NOW warm-up,
+and a 60-second maximum continuous singleton wake.
+
+When an executor sleep to the normal final-acquisition wake exceeds 60 seconds,
+split it. The board first sleeps to roughly 60 seconds before the planned
+exchange boundary, persisting only the target BSSID (never a boot-local timer
+deadline). This stutter wake remains beacon-capture-only. Its first direct
+target beacon immediately supplies a fresh TSF/local projection, after which
+the board re-sleeps to the usual 5.5-second acquisition lead plus a one-second
+stutter safety margin for boot variance. It does not wait
+for scan ranking or initialize ESP-NOW. If no target arrives within the normal
+five-second capture period—or the recalculated target is already within the
+final acquisition lead—the stutter intent is cleared and ordinary planning /
+missing-home recovery proceeds.
+
 Executor integration (2026-09-08, not deployed): the live loop now executes
 home-first plans with rotating additional scouts and continuous radio activity
 across merged windows. Two home appointments form the planning horizon; the

@@ -20,7 +20,7 @@ records.
 
 Current experimental defaults:
 
-- nominal rendezvous goal: **30 seconds**;
+- nominal rendezvous goal: **120 seconds**;
 - ESP-NOW report cadence while awake: **5 Hz**;
 - claim freshness: **20 wakes**;
 - selected-beacon association freshness: **6 wake cycles**;
@@ -45,6 +45,13 @@ increase the goal again.
    counter only when six fresh associations support the home beacon.
 5. **Deep sleep/reboot:** sleep until the next beacon boundary, preserving
    protocol state in SPIFFS.
+
+For executor sleeps longer than 60 seconds, this is a two-step sleep: wake
+roughly 60 seconds before the exchange boundary, listen only until the first
+direct target beacon, then immediately reproject and take the final sleep to
+the normal acquisition lead. The stutter wake never initializes ESP-NOW. A
+five-second no-target timeout clears the stutter intent and falls through to
+ordinary acquisition/recovery.
 
 ## Exchange-window timing contract
 

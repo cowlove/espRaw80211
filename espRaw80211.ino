@@ -279,7 +279,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     // taking the single strongest one. Normal home/scout selection is unchanged.
     static constexpr size_t testStartupTopN = 6;
     static constexpr uint64_t reportPeriodUsec = 200000;
-    static constexpr uint64_t defaultRendezvousUsec = 30ULL * 1000000ULL;
+    // Policy freshness is expressed in logical wakes, so this production-like
+    // cadence change does not silently change membership semantics.
+    static constexpr uint64_t defaultRendezvousUsec = 120ULL * 1000000ULL;
     static constexpr uint32_t scoutIntervalWakes = 2;
     // Zero preserves fair rotating scouting. Positive values give each fresh
     // rumored-singleton beacon this many additional random-selection tickets.
@@ -316,6 +318,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     // Singleton discovery may intentionally coalesce many scout windows, but
     // beacon capture is only trusted from the beginning of a fresh wake.
     static constexpr uint64_t singletonMaximumAwakeUsec = 60ULL * 1000000ULL;
+    // Long deep sleeps accumulate RTC error. Wake this far before the exchange
+    // boundary, obtain one target beacon, then make a calibrated final sleep.
+    static constexpr uint64_t stutterSleepThresholdUsec = 60ULL * 1000000ULL;
+    static constexpr uint64_t stutterWakeLeadUsec = 60ULL * 1000000ULL;
+    // The final timer still has normal deep-sleep/boot variance. Arrive one
+    // extra second early after refinement; coverage matters more than shaving
+    // this acquisition margin.
+    static constexpr uint64_t stutterFinalSafetyMarginUsec = 1000000ULL;
     static constexpr uint32_t singletonScoutAggressivenessMillionths = 1000000;
     static constexpr size_t maximumPlanAppointments = 32;
 
@@ -335,6 +345,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     SPIFFSVariable<uint64_t> spiffsRoundHome{"/roundHome7", 0};
     SPIFFSVariable<uint32_t> spiffsTimingRecovery{"/timingRecovery", 0};
     SPIFFSVariable<int> spiffsStrongestRecovery{"/strongestRecovery", 0};
+    SPIFFSVariable<uint64_t> spiffsStutterTarget{"/stutterTarget1", 0};
     RendezvousExecutor::RoundClock roundClock;
     RendezvousPlanner::Plan<maximumPlanAppointments> executionPlan{1000000};
     RendezvousExecutor::Coverage coverage[maximumPlanAppointments] = {};
@@ -435,6 +446,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         spiffsRoundHome = (uint64_t)0;
         spiffsTimingRecovery = (uint32_t)0;
         spiffsStrongestRecovery = 0;
+        spiffsStutterTarget = (uint64_t)0;
         spiffsScoutPhase = 0;
         spiffsScoutBeacon = (uint64_t)0;
         spiffsProposalBeacon = (uint64_t)0;
@@ -1796,6 +1808,15 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     void sleepForTimingRecovery(uint64_t duration) {
         advanceRoundClock(steadyMicros());
         saveClaims(); saveAssociations(); saveOrigins();
+        // Recovery still has a persisted home identity even though it lacks a
+        // current clock sample. Split this long blind sleep so a target frame
+        // can restore clock alignment before the final approach.
+        if (duration > stutterSleepThresholdUsec && spiffsBeacon.read()) {
+            spiffsStutterTarget = spiffsBeacon.read();
+            duration -= stutterWakeLeadUsec;
+            out("@u a=1 b=%012llx s=%llu", (unsigned long long)spiffsBeacon.read(),
+                (unsigned long long)duration);
+        }
         spiffsRoundElapsed = roundClock.remainder + duration;
         spiffsSleepTime = duration;
         spiffsClaimGeneration = wakeGeneration;
@@ -1850,7 +1871,6 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         advanceRoundClock(steadyMicros());
         if (!spiffsIncarnation.read()) return;
         saveClaims(); saveAssociations(); saveOrigins();
-        out("deep sleep %.3f sec executor", duration / 1000000.0);
         fflush(stdout);
 #ifndef CSIM
         uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
@@ -1859,6 +1879,29 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         const uint64_t now = steadyMicros();
         duration = executionPlan.sleepUntilNext(now, wakeAcquisitionLeadUsec);
         if (duration < 1000000) return;
+        if (duration > stutterSleepThresholdUsec &&
+            executionInterval < executionPlan.intervalCount()) {
+            const auto &interval = executionPlan.interval(executionInterval);
+            uint64_t target = plannedHome;
+            bool homePresent = false;
+            for (size_t i = 0; i < executionPlan.appointmentCount(); ++i) {
+                if (!(interval.appointments & (1ULL << i))) continue;
+                const auto &appointment = executionPlan.appointment(i);
+                if (appointment.home) homePresent = true;
+                else target = appointment.bssid;
+            }
+            if (homePresent) target = plannedHome;
+            uint64_t stutterSleep = 0;
+            if (target && RendezvousPlanner::stutterSleepUntil(
+                    now, interval.start, stutterWakeLeadUsec, stutterSleep) &&
+                stutterSleep >= 1000000) {
+                spiffsStutterTarget = target;
+                duration = stutterSleep;
+                out("@u a=1 b=%012llx s=%llu", (unsigned long long)target,
+                    (unsigned long long)duration);
+            }
+        }
+        out("deep sleep %.3f sec executor", duration / 1000000.0);
         dumpBeaconScanSummary();
         spiffsRoundElapsed = roundClock.remainder + (now-roundClock.last) + duration;
         spiffsSleepTime = duration;
@@ -1866,6 +1909,65 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         beaconCapture.stop();
         esp_sleep_enable_timer_wakeup(duration);
         esp_deep_sleep_start();
+    }
+
+    // Final calibrated stutter sleep. targetStart is valid only in this boot;
+    // account for persistence/logging work before deriving the timer duration.
+    bool sleepForStutterTarget(uint64_t targetStart) {
+        advanceRoundClock(steadyMicros());
+        if (!spiffsIncarnation.read()) return false;
+        saveClaims(); saveAssociations(); saveOrigins();
+        fflush(stdout);
+#ifndef CSIM
+        uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
+#endif
+        const uint64_t now = steadyMicros();
+        const uint64_t finalLead = wakeAcquisitionLeadUsec +
+            stutterFinalSafetyMarginUsec;
+        if (targetStart <= now + finalLead + 1000000ULL)
+            return false;
+        const uint64_t duration = targetStart - now - finalLead;
+        spiffsRoundElapsed = roundClock.remainder + (now-roundClock.last) + duration;
+        spiffsSleepTime = duration;
+        spiffsClaimGeneration = wakeGeneration;
+        out("@u h=1 s=%llu", (unsigned long long)duration);
+        fflush(stdout);
+#ifndef CSIM
+        uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
+#endif
+        beaconCapture.stop();
+        esp_sleep_enable_timer_wakeup(duration);
+        esp_deep_sleep_start();
+        return true;
+    }
+
+    // Returns true while the stutter-only wake owns the loop. It never starts
+    // ESP-NOW and accepts the first target frame rather than a full survey.
+    bool handleStutterWake(uint64_t now) {
+        const uint64_t target = spiffsStutterTarget.read();
+        if (!target) return false;
+        const BeaconInfo *timing = observedTimingThisWake(target, now);
+        if (timing) {
+            RendezvousPlanner::Appointment appointment;
+            if (RendezvousPlanner::nextAppointment(
+                    target, timing->ts, timing->seen2, now,
+                    defaultRendezvousUsec, exchangePhaseUsec,
+                    exchangeWindowUsec, target == spiffsBeacon.read(), appointment)) {
+                spiffsStutterTarget = (uint64_t)0;
+                out("@u h=0 b=%012llx", (unsigned long long)target);
+                if (sleepForStutterTarget(appointment.start)) return true;
+                out("@u f=late b=%012llx", (unsigned long long)target);
+                return false;
+            }
+        }
+        if (now - startUsec < beaconSamplingWindowUsec) {
+            delay(1);
+            return true;
+        }
+        spiffsStutterTarget = (uint64_t)0;
+        out("@u f=timeout b=%012llx", (unsigned long long)target);
+        // Continue through ordinary planning/recovery semantics.
+        return false;
     }
 
     void intervalExecutorLoop(uint64_t now) {
@@ -1890,6 +1992,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             esp_deep_sleep_start();
             return;
         }
+        if (handleStutterWake(now)) return;
         if (now-startUsec < beaconSamplingWindowUsec) { delay(1); return; }
         if (!executionPlanned) {
             if (now < nextPlanUsec) { delay(1); return; }
@@ -2313,7 +2416,8 @@ public:
 #endif
             out("@i e=%08x w=%u v=7 max=180", incarnation, wakeGeneration);
         const uint64_t homeBeacon = spiffsBeacon.read();
-        targetBeacon = homeBeacon;
+        const uint64_t stutterTarget = spiffsStutterTarget.read();
+        targetBeacon = stutterTarget ? stutterTarget : homeBeacon;
         scoutWake = false;
         scoutRendezvousWake = false;
 #ifdef CSIM
@@ -2324,7 +2428,8 @@ public:
 #endif
         printf("%09.3f setup() %s waiting for %llx\n", setupSeconds,
                scoutRendezvousWake ? "scout-rendezvous" :
-               (scoutWake ? "scout-acquire" : "home"),
+               (stutterTarget ? "stutter" :
+                (scoutWake ? "scout-acquire" : "home")),
                (unsigned long long)targetBeacon);
 #ifndef CSIM
 #if ESP_ARDUINO_VERSION_MAJOR >= 3

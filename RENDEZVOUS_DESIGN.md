@@ -18,7 +18,7 @@ experiment driver rather than part of the abstract rendezvous algorithm: it
 repeatedly forces devices back to clean protocol state so a long run produces
 many independent resynchronization episodes.
 
-Current firmware defaults are a 30-second nominal rendezvous period, Wi-Fi
+Current firmware defaults are a 120-second nominal rendezvous period, Wi-Fi
 channel 4, 5 Hz ESP-NOW reporting while awake, 20-wake claim freshness,
 six-wake current-association freshness, six required fresh listeners, and ten
 consecutive healthy qualifying cycles before a reset commit. The old fivefold

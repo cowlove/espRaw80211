@@ -43,7 +43,7 @@ scout observes a possible destination; scouting does not itself change home.
 
 ### Logical round
 
-Approximately one rendezvous period (currently 30 seconds). Association aging,
+Approximately one rendezvous period (currently 120 seconds). Association aging,
 scout cadence, credibility confirmation, and proposal activation use logical
 rounds rather than raw boot count.
 
@@ -151,7 +151,7 @@ beacon is independently selected with probability
 1.0, so a singleton adds the next appointment for every eligible beacon. The
 planner sorts these appointments and coalesces overlapping or nearby windows.
 This can intentionally produce nearly continuous exchange activity with the
-30-second test period, while naturally leaving sleep gaps with longer
+120-second test period, while naturally leaving sleep gaps with longer
 production periods. To prevent observations from spanning an indefinitely
 long radio session, an aggressive singleton always deep-sleeps and starts a
 fresh beacon-only acquisition wake after at most 60 seconds. ESP-NOW is not
@@ -287,7 +287,7 @@ The activation delay depends on current home credibility:
 | 8-11 | 4 rounds |
 | 12 | 5 rounds |
 
-At a 30-second logical round, this is nominally about 60 to 150 seconds, though
+At a 120-second logical round, this is nominally about 240 to 600 seconds, though
 the actual commit also waits for a qualifying home appointment.
 
 ### Seeing the same target again
