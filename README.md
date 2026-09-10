@@ -46,6 +46,32 @@ increase the goal again.
 5. **Deep sleep/reboot:** sleep until the next beacon boundary, preserving
    protocol state in SPIFFS.
 
+## Exchange-window timing contract
+
+The exchange window is referenced to a shared beacon clock.  The current
+experimental phase is a fixed **5 seconds after each selected beacon's TSF
+period rollover**.  Phase zero is not inherently preferable: what matters is
+that peers using the same beacon calculate the same repeatable phase.
+
+The executor must provide **coverage**, not millisecond-perfect radio gating:
+
+1. Sleep scheduling wakes the board early enough for sleep-timer error and a
+   beacon-only acquisition period (currently about 5.5 seconds of lead).
+2. Promiscuous beacon capture continues until a bounded ESP-NOW warm-up lead
+   before the first planned appointment (initially 500 ms).
+3. ESP-NOW initialization starts at that warm-up point so the first appointment
+   is covered even if initialization takes measurable time.
+4. Once initialized, ESP-NOW may transmit and receive through the warm-up lead
+   and throughout the active interval.  Planned boundaries are used for
+   attribution, health, and report scheduling—not as fine-grained TX/RX gates.
+5. Nearby or overlapping appointments are coalesced into one continuous active
+   interval.  Every constituent appointment must be covered; later members of
+   a merged interval do not require a separate radio restart at their boundary.
+
+Compact timing records should retain the planned start, initialization begin/
+completion, and first exchange activity so the warm-up margin can be measured
+on hardware before shrinking acquisition or exchange windows.
+
 ## Reading logs
 
 Important `gossip` fields are:

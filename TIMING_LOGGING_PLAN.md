@@ -1,5 +1,35 @@
 # Rendezvous Timing and Logging Implementation Plan
 
+## Exchange-window placement contract (2026-09-10)
+
+This is the agreed executor policy for the next timing implementation slice.
+It supersedes any earlier suggestion to initialize ESP-NOW exactly at phase
+zero or to gate TX/RX tightly at appointment boundaries.
+
+- Use one fixed, shared phase relative to the selected beacon's TSF period.
+  The current phase remains 5 seconds after rollover.  A fixed offset is valid
+  as long as all peers calculate it consistently.
+- Schedule deep-sleep wake sufficiently early to absorb observed sleep-timer
+  error and collect beacons before ESP-NOW affects capture (currently about
+  5.5 seconds).
+- Keep beacon capture active until a bounded ESP-NOW warm-up lead before the
+  first planned interval (initially 500 ms).  Start initialization then, not
+  immediately after planning and not exactly at the appointment boundary.
+- Promise complete *coverage* of each appointment.  ESP-NOW may be ready and
+  active during the warm-up lead; do not delay or explicitly stop TX/RX merely
+  to align individual milliseconds with the planned start/end.
+- Coalesced appointments use one continuous radio-active interval.  They must
+  cover every included appointment; later members do not trigger another init
+  or radio gate.
+- Record planned start, init begin/completion, and first exchange activity.
+  Tune only the meaningful large boundaries—acquisition lead/window and
+  exchange duration—after hardware measurements, rather than micromanaging
+  sub-window TX/RX timing now.
+
+Implementation readiness: the intended changes are bounded warm-up scheduling
+and compact timing observability.  No new clock phase, per-packet gate, or
+special merged-window state machine is required.
+
 Executor integration (2026-09-08, not deployed): the live loop now executes
 home-first plans with rotating additional scouts and continuous radio activity
 across merged windows. Two home appointments form the planning horizon; the
