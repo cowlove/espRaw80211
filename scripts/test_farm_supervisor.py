@@ -30,6 +30,9 @@ FOREIGN_MAC = 'e072a1a23784'
 # stale. This is a cadence relationship, not a separate protocol timeout.
 NOMINAL_RENDEZVOUS_SECONDS = 120
 DEFAULT_FRESHNESS_SECONDS = NOMINAL_RENDEZVOUS_SECONDS + 60
+# Foreign reports are only emitted when its appointment overlaps a monitored
+# board.  Their recurrence follows rendezvous cadence, not supervisor polling.
+DEFAULT_FOREIGN_FRESHNESS_SECONDS = DEFAULT_FRESHNESS_SECONDS
 
 
 def timestamped(message, now=None):
@@ -226,6 +229,9 @@ def main():
     parser.add_argument('--sustain-seconds', type=float, default=120)
     parser.add_argument('--freshness-seconds', type=float,
                         default=DEFAULT_FRESHNESS_SECONDS)
+    parser.add_argument('--foreign-freshness-seconds', type=float,
+                        default=DEFAULT_FOREIGN_FRESHNESS_SECONDS,
+                        help='foreign-peer evidence age (default: one cycle + 60s)')
     parser.add_argument('--ack-timeout-seconds', type=float, default=180)
     parser.add_argument('--local-boards', default='0,1,2,3,4')
     parser.add_argument('--remote-boards', default='0,1')
@@ -235,7 +241,7 @@ def main():
     args = parser.parse_args()
     status_log = args.log_file
     status_log.parent.mkdir(parents=True, exist_ok=True)
-    if min(args.poll_seconds, args.freshness_seconds,
+    if min(args.poll_seconds, args.freshness_seconds, args.foreign_freshness_seconds,
            args.ack_timeout_seconds) <= 0 or args.sustain_seconds < 0:
         parser.error('durations must be positive (sustain may be zero)')
     try:
@@ -259,10 +265,11 @@ def main():
     epoch_history_checked = False
     last_status = None
     timestamped(f'started boards={required} poll={args.poll_seconds:g}s '
-                f'sustain={args.sustain_seconds:g}s stale={args.freshness_seconds:g}s')
+                f'sustain={args.sustain_seconds:g}s stale={args.freshness_seconds:g}s '
+                f'foreign-stale={args.foreign_freshness_seconds:g}s')
     while True:
         now = time.time()
-        foreign_max_age = 2 * args.poll_seconds
+        foreign_max_age = args.foreign_freshness_seconds
         datasets = load_datasets(args.log_dir, args.remote_host, args.remote_dir,
                                  local_boards, remote_boards)
         if not epoch_history_checked:
