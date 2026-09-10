@@ -13,6 +13,23 @@ import uuid
 from pathlib import Path
 
 
+MAX_SERIAL_LINE_BYTES = 4096
+
+
+def clean_serial_line(raw):
+    """Return printable ASCII firmware text, or None for boot/baud noise."""
+    if len(raw) > MAX_SERIAL_LINE_BYTES:
+        return None
+    try:
+        text = raw.decode('ascii').rstrip('\r')
+    except UnicodeDecodeError:
+        return None
+    if any(character not in '\t' and not 32 <= ord(character) <= 126
+           for character in text):
+        return None
+    return text
+
+
 def default_reset_request_file(board):
     return Path('/tmp') / f'espRaw80211-{board}.reset-request'
 
@@ -61,6 +78,7 @@ def reconnect_log(board, port, logfile, retry=1.0, reset_request_file=None):
                 source.open()
                 emit(f'logger-session host={host} pid={os.getpid()} reconnect=1')
                 pending = b''
+                dropped_bytes = dropped_lines = 0
                 while True:
                     token = requested_reset(reset_request_file)
                     if token is not None:
@@ -72,9 +90,18 @@ def reconnect_log(board, port, logfile, retry=1.0, reset_request_file=None):
                     pending += chunk
                     while b'\n' in pending:
                         raw, pending = pending.split(b'\n', 1)
-                        emit(raw.decode('utf-8', errors='replace').rstrip('\r'))
+                        text = clean_serial_line(raw)
+                        if text is None:
+                            dropped_bytes += len(raw) + 1
+                            dropped_lines += 1
+                            continue
+                        if dropped_bytes:
+                            emit(f'logger-noise bytes={dropped_bytes} lines={dropped_lines}')
+                            dropped_bytes = dropped_lines = 0
+                        emit(text)
                     if len(pending) > 65536:
-                        emit('logger-partial ' + pending.decode('utf-8', errors='replace'))
+                        dropped_bytes += len(pending)
+                        dropped_lines += 1
                         pending = b''
             finally:
                 source.close()

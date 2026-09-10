@@ -11,6 +11,13 @@ import timestamp_serial as serial_logger
 
 
 class InfrastructureTests(unittest.TestCase):
+    def test_serial_logger_filters_boot_noise_and_oversized_lines(self):
+        self.assertEqual(serial_logger.clean_serial_line(b'00001.0 @i e=aa\r'),
+                         '00001.0 @i e=aa')
+        self.assertIsNone(serial_logger.clean_serial_line(b'\x00\xffgarbage'))
+        self.assertIsNone(serial_logger.clean_serial_line(
+            b'x' * (serial_logger.MAX_SERIAL_LINE_BYTES + 1)))
+
     def test_reset_request_survives_until_consumed(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
