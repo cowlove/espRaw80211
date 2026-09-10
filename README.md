@@ -79,6 +79,24 @@ Compact timing records should retain the planned start, initialization begin/
 completion, and first exchange activity so the warm-up margin can be measured
 on hardware before shrinking acquisition or exchange windows.
 
+### Window-settling measurements
+
+Each completed normal exchange emits compact `@m` measurements for its beacon
+capture (`k=b`) and ESP-NOW interval (`k=e`). `s` is the elapsed microseconds
+to the last conservative state mutation; `d` is the elapsed time to the last
+narrower current-decision mutation. `0` means that no qualifying mutation was
+observed in that window. These are passive diagnostics: they do not shorten a
+window or alter rendezvous/migration behavior. Analyze the per-cycle data and
+its p50/p90 summaries with:
+
+```sh
+./scripts/analyze_rendezvous.py --evidence --session all
+```
+
+`s` is the safer tuning bound: it includes accepted evidence that could affect
+a later decision. `d` is an optimistic bound for the current decision only;
+exact counterfactual equivalence would require packet-trace replay.
+
 ## Reading logs
 
 Important `gossip` fields are:

@@ -50,6 +50,28 @@ five-second capture period—or the recalculated target is already within the
 final acquisition lead—the stutter intent is cleared and ordinary planning /
 missing-home recovery proceeds.
 
+### Passive window-settling measurement (2026-09-10)
+
+Before reducing either physical window, firmware records when information last
+changed during every normal beacon-capture and ESP-NOW exchange interval. The
+compact `@m` record carries `k=b` (beacon) or `k=e` (exchange), elapsed
+microseconds to the last conservative state mutation (`s`), elapsed
+microseconds to the last current-decision mutation (`d`), and a final compact
+state signature. Beacon records also carry final eligible-count (`n`).
+
+`s` includes accepted claims/associations, incarnation/direct-sender evidence,
+and eligible/ranked beacon-set changes that may influence future rounds. `d`
+only moves when the immediate selection/proposal fingerprint changes. Duplicate
+or rejected traffic does not extend either time. This is passive instrumentation
+only: it does not alter schedules, migration, or window lengths. It is a
+conservative, low-overhead approximation; proving exact equivalence under an
+earlier cutoff would require retaining and replaying every packet.
+
+The analyzer preserves the records per completed exchange and reports
+per-board p50/p90 state/decision settling values under `--evidence`; JSON
+output retains the raw per-cycle values for grouping by board, target, and
+appointment kind.
+
 Executor integration (2026-09-08, not deployed): the live loop now executes
 home-first plans with rotating additional scouts and continuous radio activity
 across merged windows. Two home appointments form the planning horizon; the

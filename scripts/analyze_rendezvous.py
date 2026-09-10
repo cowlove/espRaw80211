@@ -226,6 +226,15 @@ def human_age(seconds: float) -> str:
     return f"{seconds}s"
 
 
+def settling_summary(values):
+    """Return p50/p90 seconds for compact settling instrumentation."""
+    if not values:
+        return '-'
+    ordered = sorted(values)
+    p90 = ordered[min(len(ordered) - 1, int(len(ordered) * .9))]
+    return f'{statistics.median(ordered) / 1e6:.2f}/{p90 / 1e6:.2f}s'
+
+
 # One full 120-second rendezvous cycle plus a 60-second host/log margin. Keep
 # this tied to cadence; a fixed 90-second skew made all-board observations
 # spuriously impossible after the period grew beyond 90 seconds.
@@ -947,6 +956,13 @@ def main() -> int:
                       f"listeners={latest.get('listeners')} health={latest.get('health')} "
                       f"rawrx={latest.get('rawrx')} session={latest.get('session')}")
                 print(f"  merges={summary['merge']} epoch-rejections(includes-self)={summary['epoch_rejections_including_self']}")
+                settling = summary.get('settling', {})
+                if settling:
+                    print('  settling p50/p90 state/decision: '
+                          f"beacon={settling_summary(settling.get('beacon_state_usec'))}/"
+                          f"{settling_summary(settling.get('beacon_decision_usec'))} "
+                          f"exchange={settling_summary(settling.get('exchange_state_usec'))}/"
+                          f"{settling_summary(settling.get('exchange_decision_usec'))}")
             if args.overlaps:
                 print(f'Same-BSSID planned overlaps: {len(pairs)} (showing latest 20)')
                 for pair in pairs[-20:]:

@@ -37,6 +37,18 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn('latest-consensus=7/10', output.getvalue())
         self.assertIn('reset=-', output.getvalue())
 
+    def test_compact_settling_records_are_retained_per_exchange(self):
+        data = cycle(wire=7, extra=(
+            line('00005.1 @m k=b s=3200000 d=2800000 n=9 q=abc') +
+            line('00008.2 @m k=e x=1 s=3100000 d=700000 q=def')))
+        parsed, partial = evidence.parse_evidence(data)
+        self.assertEqual(partial, 0)
+        self.assertEqual(parsed[0].beacon_settling['s'], '3200000')
+        self.assertEqual(parsed[0].exchange_settling['d'], '700000')
+        summary = evidence.summarize(data, (parsed, partial))
+        self.assertEqual(summary['settling']['beacon_state_usec'], [3200000])
+        self.assertEqual(summary['settling']['exchange_decision_usec'], [700000])
+
     def test_v7_multiple_exchanges_in_one_round(self):
         def exchange(sequence, extra=b''):
             return cycle(epoch='bb', wake=2, extra=extra).replace(

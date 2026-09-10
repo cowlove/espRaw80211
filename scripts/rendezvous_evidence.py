@@ -15,6 +15,10 @@ SCAN_OBSERVED = re.compile(
     r'matrix scan-observed beacon ([0-9a-f]+) packets (\d+) '
     r'span ([0-9.]+) sec .*?rssi avg (-?\d+) min (-?\d+) max (-?\d+) '
     r'eligible (yes|no)')
+LEGACY_BEACON_SETTLING = re.compile(
+    r'settling beacon state-usec (\d+) decision-usec (\d+) eligible (\d+) signature ([0-9a-f]+)')
+LEGACY_EXCHANGE_SETTLING = re.compile(
+    r'settling exchange interval (\d+) state-usec (\d+) decision-usec (\d+) signature ([0-9a-f]+)')
 
 
 def timestamp(value):
@@ -91,6 +95,8 @@ class Exchange:
     scout_targets: set = field(default_factory=set)
     home_targets: set = field(default_factory=set)
     scan_observed: list = field(default_factory=list)
+    beacon_settling: dict = field(default_factory=dict)
+    exchange_settling: dict = field(default_factory=dict)
     end_wall: float | None = None
 
 
@@ -197,6 +203,22 @@ def parse_evidence(data):
                 current.scout_targets.add(found[3])
             else:
                 current.home_targets.add(found[3])
+        if '@m ' in body:
+            values = dict(re.findall(r'([a-z]+)=([^ ]+)', body.split('@m ', 1)[1]))
+            if values.get('k') == 'b':
+                current.beacon_settling = values
+            elif values.get('k') == 'e':
+                current.exchange_settling = values
+        found = LEGACY_BEACON_SETTLING.search(body)
+        if found:
+            state, decision, eligible, signature = found.groups()
+            current.beacon_settling = {'k': 'b', 's': state, 'd': decision,
+                                       'n': eligible, 'q': signature}
+        found = LEGACY_EXCHANGE_SETTLING.search(body)
+        if found and (current.sequence is None or int(found[1]) == current.sequence):
+            sequence, state, decision, signature = found.groups()
+            current.exchange_settling = {'k': 'e', 'x': sequence, 's': state,
+                                         'd': decision, 'q': signature}
         found = SCAN_OBSERVED.search(body)
         if found:
             bssid, packets, span, average, minimum, maximum, eligible = found.groups()
@@ -223,6 +245,15 @@ def summarize(data, parsed=None):
         for key, value in cycle.merge.items():
             merge[key] = merge.get(key, 0) + value
     latest = cycles[-1] if cycles else None
+    settling = {}
+    for phase, attribute in (('beacon', 'beacon_settling'),
+                             ('exchange', 'exchange_settling')):
+        for kind, field_name in (('state', 's'), ('decision', 'd')):
+            values = [int(getattr(cycle, attribute)[field_name])
+                      for cycle in cycles
+                      if field_name in getattr(cycle, attribute)]
+            if values:
+                settling[f'{phase}_{kind}_usec'] = values
     mac_order = {'same': 0, 'byte_reversed': 0, 'different': 0}
     for cycle in cycles:
         for origin, peer in cycle.peers.items():
@@ -249,6 +280,7 @@ def summarize(data, parsed=None):
         'peer_mac_order_observations': mac_order,
         'origin_replacements': transitions,
         'epoch_rejections_including_self': sum(c.epoch_rejected for c in cycles),
+        'settling': settling,
         'latest': None if latest is None else {
             'session': latest.session, 'incarnation': latest.epoch,
             'wake': latest.wake, 'exchange': latest.sequence,

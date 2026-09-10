@@ -14,7 +14,7 @@ class OriginEpochTests(unittest.TestCase):
             'struct RemoteBeaconStats', 1)[0]
         methods = 'bool epochMatches(' + sketch.split('    bool epochMatches(', 1)[1].split(
             '    size_t listenerCount(', 1)[0]
-        claim = 'void mergeClaim(' + sketch.split('    void mergeClaim(', 1)[1].split(
+        claim = 'bool mergeClaim(' + sketch.split('    bool mergeClaim(', 1)[1].split(
             '    void onBroadScan(', 1)[0]
         source = r'''
 #include <cassert>

@@ -357,6 +357,12 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     uint64_t plannedPeriod = 0;
     uint64_t nextPlanUsec = 0;
     uint32_t intervalRawStart = 0, intervalOkStart = 0, intervalFailStart = 0;
+    // Passive settling instrumentation. State includes any accepted evidence
+    // that may affect a future decision; decision is the narrower current
+    // choice fingerprint. Zero means no qualifying mutation in that window.
+    uint64_t beaconLastStateUsec = 0, beaconLastDecisionUsec = 0;
+    uint64_t exchangeLastStateUsec = 0, exchangeLastDecisionUsec = 0;
+    uint64_t beaconDecisionSignature = 0, exchangeDecisionSignature = 0;
     uint32_t coverageFailures[maximumPlanAppointments] = {};
     SPIFFSVariable<string> spiffsClaims{"/claims6", ""};
     SPIFFSVariable<string> spiffsAssociations{"/associations6", ""};
@@ -795,6 +801,45 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 
     static int score(const BeaconInfo &info) { return info.count; }
 
+    uint64_t beaconCandidateSignature() const {
+        uint64_t signature = 0;
+        for (const BeaconInfo &info : packetLog) {
+            if (!info.ssid || info.rssi < reportMinRssi ||
+                info.count < minimumCandidatePackets) continue;
+            // Eligibility and deterministic current rank are decision inputs.
+            signature ^= info.ssid + 0x9e3779b97f4a7c15ULL +
+                (signature << 6) + (signature >> 2);
+        }
+        const int best = bestBeaconIndex();
+        if (packetLog[best].ssid)
+            signature ^= packetLog[best].ssid * 0x9e3779b97f4a7c15ULL;
+        return signature;
+    }
+
+    size_t eligibleBeaconCount() const {
+        size_t count = 0;
+        for (const BeaconInfo &info : packetLog)
+            if (info.ssid && info.rssi >= reportMinRssi &&
+                info.count >= minimumCandidatePackets) ++count;
+        return count;
+    }
+
+    uint64_t exchangeDecisionState() {
+        const uint64_t home = spiffsBeacon.read();
+        uint64_t signature = home ^ ((uint64_t)listenerCount(home) << 48);
+        signature ^= spiffsProposalBeacon.read();
+        signature ^= (uint64_t)spiffsProposalMembers.read() << 32;
+        // Positive direct evidence is a boolean migration gate; packet count
+        // beyond the first does not change the current decision.
+        if (targetBeacon && directPacketsSelecting(targetBeacon))
+            signature ^= 0x5bd1e9955bd1e995ULL;
+        return signature;
+    }
+
+    uint64_t elapsedInWindow(uint64_t when, uint64_t begin) const {
+        return when >= begin ? when - begin : 0;
+    }
+
     static bool betterQuality(const BeaconInfo &a, const BeaconInfo &b) {
         if (a.count != b.count) return a.count > b.count;
         const uint64_t aSpan = a.seen2 >= a.firstSeen2 ?
@@ -1138,27 +1183,30 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         static_cast<BeaconRendezvousContext *>(arg)->onBroadScan(packet);
     }
 
-    void mergeClaim(uint64_t originMac, uint64_t bssid,
+    bool mergeClaim(uint64_t originMac, uint64_t bssid,
                     uint32_t originGeneration, int8_t rssi, uint32_t originEpoch) {
-        if (originMac == 0 || bssid == 0) return;
+        if (originMac == 0 || bssid == 0) return false;
         size_t empty = claimTableSize;
         for (size_t i = 0; i < claimTableSize; ++i) {
             BeaconClaim &claim = claims[i];
             if (claim.originMac == originMac && claim.bssid == bssid) {
-                if (originGeneration < claim.originGeneration) return;
+                if (originGeneration < claim.originGeneration) return false;
+                const bool changed = originGeneration != claim.originGeneration ||
+                    claim.rssi != rssi || claim.originEpoch != originEpoch;
                 if (originGeneration > claim.originGeneration)
                     claim.learnedWakeGeneration = wakeGeneration;
                 claim.originGeneration = originGeneration;
                 claim.rssi = rssi;
                 claim.receivedWakeGeneration = wakeGeneration;
                 claim.originEpoch = originEpoch;
-                return;
+                return changed;
             }
             if (empty == claimTableSize && claim.originMac == 0) empty = i;
         }
-        if (empty == claimTableSize) return;
+        if (empty == claimTableSize) return false;
         claims[empty] = {originMac, bssid, originGeneration, rssi,
                          wakeGeneration, wakeGeneration, originEpoch};
+        return true;
     }
 
     void onBroadScan(const WifiBeaconPacket &packet) {
@@ -1173,8 +1221,17 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         for (i = 0; i < packetLogSize; ++i) {
             if (packetLog[i].ssid == bssid) {
                 BeaconInfo &info = packetLog[i];
+                const uint64_t before = beaconCandidateSignature();
                 recordBeacon(info, packet);
                 mergeClaim(deviceMac, bssid, wakeGeneration, packet.rssi, incarnation);
+                const uint64_t after = beaconCandidateSignature();
+                const uint64_t now = info.seen2;
+                // A target timing refresh is relevant even when candidate
+                // membership/ranking did not change: it affects alignment.
+                if (bssid == targetBeacon || before != after)
+                    beaconLastStateUsec = now;
+                if (before != after) beaconLastDecisionUsec = now;
+                beaconDecisionSignature = after;
                 return;
             }
         }
@@ -1263,6 +1320,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         }
         const bool refreshed = mergeAssociation(header.senderMac, header.selectedBeacon,
                          header.wakeGeneration, 0, true, header.incarnation);
+        bool meaningfulStateChanged = refreshed;
         if (peerSlot >= 0 && refreshed) reportSenderAssociationRefresh[peerSlot]++;
         if (peerSlot >= 0) reportSenderSelectedBeacon[peerSlot] = header.selectedBeacon;
         const size_t claimBytesAvailable = length - sizeof(header);
@@ -1290,8 +1348,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             // Header already established the sender incarnation. Entries,
             // including the sender's own, may not contradict it.
             if (!acceptOrigin(entry.originMac, entry.incarnation, false)) continue;
-            mergeClaim(entry.originMac, entry.bssid,
-                       entry.originGeneration, entry.rssi, entry.incarnation);
+            if (mergeClaim(entry.originMac, entry.bssid,
+                           entry.originGeneration, entry.rssi, entry.incarnation))
+                meaningfulStateChanged = true;
             size_t slot = 0;
             for (; slot < remoteStatsSize; ++slot) {
                 if (remoteStats[slot].bssid == entry.bssid) break;
@@ -1332,8 +1391,16 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             memcpy(&entry, data + associationOffset +
                    i * sizeof(entry), sizeof(entry));
             if (!acceptOrigin(entry.originMac, entry.incarnation, false)) continue;
-            mergeAssociation(entry.originMac, entry.selectedBeacon,
-                             entry.originGeneration, entry.ageCycles, false, entry.incarnation);
+            if (mergeAssociation(entry.originMac, entry.selectedBeacon,
+                                 entry.originGeneration, entry.ageCycles, false,
+                                 entry.incarnation))
+                meaningfulStateChanged = true;
+        }
+        if (meaningfulStateChanged) exchangeLastStateUsec = reportLocalRx;
+        const uint64_t decision = exchangeDecisionState();
+        if (decision != exchangeDecisionSignature) {
+            exchangeDecisionSignature = decision;
+            exchangeLastDecisionUsec = reportLocalRx;
         }
     }
 
@@ -2027,7 +2094,6 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             delay(1); return;
         }
         if (!exchangeActive) {
-            resetIntervalStats();
             exchangeSequence = spiffsExchangeSequence.read() + 1;
             spiffsExchangeSequence = exchangeSequence;
             targetBeacon = plannedHome;
@@ -2039,6 +2105,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 else targetBeacon = a.bssid;
             }
             if (homePresent) targetBeacon = plannedHome;
+            resetIntervalStats();
+            exchangeLastStateUsec = exchangeLastDecisionUsec = 0;
+            exchangeDecisionSignature = exchangeDecisionState();
             espNowStartUsec = now;
             espNowEndUsec = interval.end;
             nextReportUsec = now;
@@ -2053,6 +2122,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 out("ESP-NOW exchange phase started interval %u planned %llu-%llu",
                     exchangeSequence, (unsigned long long)interval.start,
                     (unsigned long long)interval.end);
+                out("settling beacon state-usec %llu decision-usec %llu eligible %u signature %llx",
+                    (unsigned long long)elapsedInWindow(beaconLastStateUsec, startUsec),
+                    (unsigned long long)elapsedInWindow(beaconLastDecisionUsec, startUsec),
+                    (unsigned)eligibleBeaconCount(),
+                    (unsigned long long)beaconDecisionSignature);
             } else
 #endif
             {
@@ -2062,6 +2136,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                     (unsigned long long)interval.start,
                     (unsigned long long)espNowStartUsec,
                     (unsigned long long)interval.end);
+                out("@m k=b s=%llu d=%llu n=%u q=%llx",
+                    (unsigned long long)elapsedInWindow(beaconLastStateUsec, startUsec),
+                    (unsigned long long)elapsedInWindow(beaconLastDecisionUsec, startUsec),
+                    (unsigned)eligibleBeaconCount(),
+                    (unsigned long long)beaconDecisionSignature);
             }
         }
         for (size_t i = 0; i < executionPlan.appointmentCount(); ++i) {
@@ -2159,6 +2238,20 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             reportRxCount, reportValidRxCount, reportSenderCount);
         dumpExchangePeers();
         dumpAssociationTable(home);
+#ifdef CSIM
+        if (csimLegacyDiagnostics)
+            out("settling exchange interval %u state-usec %llu decision-usec %llu signature %llx",
+                exchangeSequence,
+                (unsigned long long)elapsedInWindow(exchangeLastStateUsec, espNowStartUsec),
+                (unsigned long long)elapsedInWindow(exchangeLastDecisionUsec, espNowStartUsec),
+                (unsigned long long)exchangeDecisionSignature);
+        else
+#endif
+            out("@m k=e x=%u s=%llu d=%llu q=%llx",
+                exchangeSequence,
+                (unsigned long long)elapsedInWindow(exchangeLastStateUsec, espNowStartUsec),
+                (unsigned long long)elapsedInWindow(exchangeLastDecisionUsec, espNowStartUsec),
+                (unsigned long long)exchangeDecisionSignature);
 #ifdef CSIM
         if (csimLegacyDiagnostics)
             out("exchange complete interval %u", exchangeSequence);
@@ -2358,6 +2451,10 @@ public:
         scanParseRejects = 0;
         scanAccepted = 0;
         targetHits = 0;
+        beaconLastStateUsec = beaconLastDecisionUsec = 0;
+        beaconDecisionSignature = 0;
+        exchangeLastStateUsec = exchangeLastDecisionUsec = 0;
+        exchangeDecisionSignature = 0;
         espNowStarted = false;
         espNowStartUsec = 0;
         espNowEndUsec = 0;
