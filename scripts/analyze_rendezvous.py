@@ -958,11 +958,11 @@ def main() -> int:
                 print(f"  merges={summary['merge']} epoch-rejections(includes-self)={summary['epoch_rejections_including_self']}")
                 settling = summary.get('settling', {})
                 if settling:
-                    print('  settling p50/p90 state/decision: '
-                          f"beacon={settling_summary(settling.get('beacon_state_usec'))}/"
-                          f"{settling_summary(settling.get('beacon_decision_usec'))} "
-                          f"exchange={settling_summary(settling.get('exchange_state_usec'))}/"
-                          f"{settling_summary(settling.get('exchange_decision_usec'))}")
+                    print('  settling p50/p90: '
+                          f"beacon-state={settling_summary(settling.get('beacon_state_usec'))} "
+                          f"beacon-decision={settling_summary(settling.get('beacon_decision_usec'))} "
+                          f"exchange-state={settling_summary(settling.get('exchange_state_usec'))} "
+                          f"exchange-decision={settling_summary(settling.get('exchange_decision_usec'))}")
             if args.overlaps:
                 print(f'Same-BSSID planned overlaps: {len(pairs)} (showing latest 20)')
                 for pair in pairs[-20:]:
