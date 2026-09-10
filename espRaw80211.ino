@@ -296,10 +296,18 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     static constexpr int testConsensusCyclesToCommit = 10;
     static constexpr int testResetDelayCycles = 3;
     static constexpr int testConsensusMissesToReset = 3;
-    // Beacon acquisition and ESP-NOW exchange are separate phases. Keep a
-    // generous acquisition window, and allow five seconds for gossip once a
-    // usable beacon has been observed.
+    // Every exchange begins at this shared phase within the selected beacon's
+    // TSF period. The phase need not be zero, but must be predictable to all
+    // peers using that beacon clock.
     static constexpr uint64_t beaconSamplingWindowUsec = 5ULL * 1000000ULL;
+    static constexpr uint64_t exchangePhaseUsec = beaconSamplingWindowUsec;
+    // Wake early enough to absorb sleep-timer error and capture beacons.
+    static constexpr uint64_t wakeAcquisitionLeadUsec =
+        beaconSamplingWindowUsec + 500000ULL;
+    // Initialize ESP-NOW shortly before the first planned interval. This
+    // retains beacon-only sampling for most of the lead while ensuring the
+    // radio is ready before the shared exchange phase begins.
+    static constexpr uint64_t espNowInitLeadUsec = 500000ULL;
     static constexpr uint64_t exchangeWindowUsec = 5ULL * 1000000ULL;
     static constexpr uint32_t timingRecoveryBlindSleeps = 2;
     static constexpr uint64_t timingRecoverySleepUsec =
@@ -1663,9 +1671,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         const uint64_t period = defaultRendezvousUsec;
         RendezvousPlanner::Appointment first, second, scout;
         if (!RendezvousPlanner::nextAppointment(home, timing->ts, timing->seen2,
-            now, period, beaconSamplingWindowUsec, exchangeWindowUsec, true, first) ||
+            now, period, exchangePhaseUsec, exchangeWindowUsec, true, first) ||
             !RendezvousPlanner::nextAppointment(home, timing->ts, timing->seen2,
-            first.end, period, beaconSamplingWindowUsec, exchangeWindowUsec, true, second) ||
+            first.end, period, exchangePhaseUsec, exchangeWindowUsec, true, second) ||
             !executionPlan.addHome(first) || !executionPlan.addHome(second)) return false;
         const bool singletonHome = listenerCount(home) == 1;
         const uint32_t singletonAggressiveness = singletonScoutAggressiveness();
@@ -1705,7 +1713,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                     const BeaconInfo *other = observedTimingThisWake(selected, now);
                     if (!other || !RendezvousPlanner::nextAppointment(
                             selected, other->ts, other->seen2, now, period,
-                            beaconSamplingWindowUsec, exchangeWindowUsec,
+                            exchangePhaseUsec, exchangeWindowUsec,
                             false, scout))
                         continue;
                     if (executionPlan.addScout(scout, UINT64_MAX))
@@ -1748,7 +1756,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 }
                 const BeaconInfo *other = observedTimingThisWake(selected, now);
                 if (other && RendezvousPlanner::nextAppointment(selected, other->ts,
-                    other->seen2, now, period, beaconSamplingWindowUsec,
+                    other->seen2, now, period, exchangePhaseUsec,
                     exchangeWindowUsec, false, scout)) {
                     if (executionPlan.addScout(scout, exchangeWindowUsec + 2000000))
                         spiffsScoutBeacon = selected;
@@ -1849,7 +1857,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 #endif
         // Account for save/log time before deciding whether sleep is still safe.
         const uint64_t now = steadyMicros();
-        duration = executionPlan.sleepUntilNext(now, beaconSamplingWindowUsec + 500000);
+        duration = executionPlan.sleepUntilNext(now, wakeAcquisitionLeadUsec);
         if (duration < 1000000) return;
         dumpBeaconScanSummary();
         spiffsRoundElapsed = roundClock.remainder + (now-roundClock.last) + duration;
@@ -1890,22 +1898,28 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 return;
             }
         }
-        if (!espNowStarted) {
-            // Preserve beacon-only acquisition before the first ESP-NOW init:
-            // Jim observed early init suppressing promiscuous beacon callbacks.
-            // Keep the initialized radio across merged/nearby appointments.
-            privMux.registerReadCallback("BRPT", [this](const uint8_t *from,
-                const uint8_t *data, int length) { onReport(from, data, length); });
-            espNowStarted = true;
-            return;
-        }
         if (executionInterval >= executionPlan.intervalCount()) {
             executionPlanned = false;
             return;
         }
         const auto &interval = executionPlan.interval(executionInterval);
+        const uint64_t initializeAt = interval.start > espNowInitLeadUsec ?
+            interval.start - espNowInitLeadUsec : interval.start;
+        if (!espNowStarted && now >= initializeAt) {
+            const uint64_t initBeginUsec = steadyMicros();
+            privMux.registerReadCallback("BRPT", [this](const uint8_t *from,
+                const uint8_t *data, int length) { onReport(from, data, length); });
+            const uint64_t initCompleteUsec = steadyMicros();
+            espNowStarted = true;
+            out("@n p=%llu b=%llu c=%llu w=%llu",
+                (unsigned long long)initializeAt,
+                (unsigned long long)initBeginUsec,
+                (unsigned long long)initCompleteUsec,
+                (unsigned long long)interval.start);
+            now = initCompleteUsec;
+        }
         if (!exchangeActive && now < interval.start) {
-            const uint64_t sleep = executionPlan.sleepUntilNext(now, beaconSamplingWindowUsec+500000);
+            const uint64_t sleep = executionPlan.sleepUntilNext(now, wakeAcquisitionLeadUsec);
             if (sleep >= 1000000) sleepForExecutor(sleep);
             delay(1); return;
         }
@@ -1941,8 +1955,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             {
                 out("@i e=%08x w=%u v=7 x=%u", incarnation,
                     wakeGeneration, exchangeSequence);
-                out("@e begin=%u s=%llu e=%llu", exchangeSequence,
+                out("@e begin=%u s=%llu a=%llu e=%llu", exchangeSequence,
                     (unsigned long long)interval.start,
+                    (unsigned long long)espNowStartUsec,
                     (unsigned long long)interval.end);
             }
         }

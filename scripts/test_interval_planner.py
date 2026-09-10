@@ -101,6 +101,9 @@ int main() {
     assert(a.start==7 && a.end==10 && a.late);
     assert(nextAppointment(1,0,0,10,30,5,5,true,a));
     assert(a.start==35 && a.end==40 && !a.late);
+    // A shared nonzero phase stays exact in beacon-clock coordinates.
+    assert(nextAppointment(1,30000000,0,4500000,30000000,5000000,5000000,true,a));
+    assert(a.start==5000000 && a.end==10000000 && !a.late);
     assert(nextAppointment(1,32,0,0,30,29,5,true,a));
     assert(a.start==0 && a.end==2 && a.late); // previous cycle crosses boundary
     assert(nextAppointment(1,2,0,0,30,29,5,true,a));
