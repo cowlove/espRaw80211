@@ -52,6 +52,18 @@ class SwarmOracleTests(unittest.TestCase):
         self.assertEqual([event['bssid'] for event in events], ['aaa', 'bbb'])
         self.assertEqual(analyzer.human_age(3661), '1h1m')
 
+    def test_foreign_coverage_classifies_strict_threshold_and_gap(self):
+        # Evidence establishes presence for a fixed freshness interval.  The
+        # union, rather than record count, is what labels an epoch.
+        covered, records = analyzer.foreign_coverage(100, 200, [90, 140], 50)
+        self.assertEqual((covered, records), (90, 2))
+        self.assertEqual(analyzer.foreign_coverage(100, 200, [], 50), (0, 0))
+        self.assertEqual(analyzer.foreign_condition(covered / 100, covered, .60), 'F+')
+        partial, _ = analyzer.foreign_coverage(100, 200, [150], 30)
+        self.assertEqual(analyzer.foreign_condition(partial / 100, partial, .60),
+                         'inconclusive')
+        self.assertEqual(analyzer.foreign_condition(0, 0, .60), 'F-')
+
     def test_current_home_distribution_is_popularity_sorted(self):
         def data(home, minute=0, wake=1):
             prefix = f'2026-09-08T12:{minute:02d}'

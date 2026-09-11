@@ -26,6 +26,10 @@ GOSSIP = re.compile(r"gossip .*? exchange (healthy|incomplete).*? home ([0-9a-f]
 CONSENSUS = re.compile(r"test consensus (\d+)/10")
 DEFAULT_TAIL_BYTES = 1_000_000
 SCOUT_LINK_MIN_WIRE_VERSION = 7
+# The unlogged bridge board used in the farm experiment.  Keep the classifier
+# independent of supervisor process state: it reconstructs presence from the
+# append-only device logs.
+DEFAULT_FOREIGN_MAC = 'e072a1a23784'
 
 
 @dataclass
@@ -413,6 +417,103 @@ def epoch_recovery_events(datasets, required: int, marker_skew: float = 15,
             'latency': consensus[0] - wave_end if consensus else None,
         })
     return results
+
+
+def foreign_evidence_times(datasets, mac: str = DEFAULT_FOREIGN_MAC) -> list[float]:
+    """Return timestamps of received evidence naming the foreign radio MAC."""
+    needle = mac.lower().replace(':', '')
+    patterns = (
+        f'association origin {needle}', f'matrix association device {needle}',
+        f'espnow summary origin {needle}', f'radio-from {needle}',
+        f'@p o={needle}', f'r={needle}', f'report-clock-rx sender {needle}',
+        f'@r s={needle}',
+    )
+    times = []
+    for _, data in datasets:
+        for _, _, wall, body in evidence.records(data):
+            if wall is not None and any(pattern in body.replace(':', '').lower()
+                                        for pattern in patterns):
+                times.append(wall)
+    return sorted(set(times))
+
+
+def foreign_coverage(start: float, end: float, evidence_times: list[float],
+                     freshness_seconds: float) -> tuple[float, int]:
+    """Return union coverage by freshness intervals and contributing records."""
+    if end <= start:
+        return 0.0, 0
+    intervals = []
+    for observed in evidence_times:
+        left, right = max(start, observed), min(end, observed + freshness_seconds)
+        if right > left:
+            intervals.append((left, right))
+    intervals.sort()
+    covered = 0.0
+    merged_end = None
+    for left, right in intervals:
+        if merged_end is None or left > merged_end:
+            covered += right - left
+            merged_end = right
+        elif right > merged_end:
+            covered += right - merged_end
+            merged_end = right
+    return covered, len(intervals)
+
+
+def foreign_condition(coverage_fraction: float, covered_seconds: float,
+                      threshold: float) -> str:
+    if covered_seconds == 0:
+        return 'F-'
+    return 'F+' if coverage_fraction > threshold else 'inconclusive'
+
+
+def foreign_convergence_events(datasets, required: int,
+                               freshness_seconds: float = DEFAULT_OBSERVATION_SKEW_SECONDS,
+                               threshold: float = .60):
+    """Label complete cold-epoch convergence intervals F+/F-/inconclusive.
+
+    F+ requires *more than* threshold coverage by fresh foreign-radio evidence;
+    F- requires no coverage.  Intermediate coverage is intentionally retained
+    but excluded from either condition.
+    """
+    times = foreign_evidence_times(datasets)
+    results = []
+    for row in epoch_recovery_events(datasets, required):
+        if row['latency'] is None:
+            continue
+        covered, records = foreign_coverage(row['epoch_time'], row['consensus_time'],
+                                            times, freshness_seconds)
+        fraction = covered / row['latency'] if row['latency'] else 0.0
+        condition = foreign_condition(fraction, covered, threshold)
+        results.append({**row, 'foreign_coverage_seconds': covered,
+                        'foreign_coverage_fraction': fraction,
+                        'foreign_records': records, 'foreign_condition': condition})
+    return results
+
+
+def print_foreign_convergence(datasets, required: int, freshness_seconds: float,
+                              threshold: float) -> None:
+    print('Foreign-presence convergence | cold epoch → 7/7 consensus')
+    rows = foreign_convergence_events(datasets, required, freshness_seconds, threshold)
+    if not rows:
+        print('  no complete cold-epoch convergence intervals in selected logs')
+        return
+    selected = defaultdict(list)
+    for row in rows:
+        epoch = datetime.fromtimestamp(row['epoch_time']).astimezone().isoformat(timespec='seconds')
+        print(f"  epoch={epoch} latency={row['latency']:.1f}s foreign={row['foreign_condition']} "
+              f"coverage={row['foreign_coverage_fraction']:.0%} "
+              f"({row['foreign_coverage_seconds']:.1f}s; records={row['foreign_records']})")
+        if row['foreign_condition'] != 'inconclusive':
+            selected[row['foreign_condition']].append(row['latency'])
+    print(f"  rule: F-=0%; F+>{threshold:.0%}; otherwise=inconclusive; freshness={freshness_seconds:g}s")
+    for condition in ('F-', 'F+'):
+        values = selected[condition]
+        if values:
+            print(f"  {condition}: n={len(values)} median={statistics.median(values):.1f}s "
+                  f"min={min(values):.1f}s max={max(values):.1f}s")
+        else:
+            print(f'  {condition}: n=0')
 
 
 def print_epoch_recovery(datasets, required: int) -> None:
@@ -861,6 +962,13 @@ def main() -> int:
     ap.add_argument("--reset-recovery", action="store_true", help="measure reset-wave execution to next emerging same-home consensus")
     ap.add_argument("--epoch-recovery", action="store_true",
                     help="measure complete cold-reset epoch waves to emerging consensus")
+    ap.add_argument('--foreign-convergence', action='store_true',
+                    help='label cold-epoch convergence intervals F+/F-/inconclusive from foreign-MAC evidence')
+    ap.add_argument('--foreign-freshness-seconds', type=float,
+                    default=DEFAULT_OBSERVATION_SKEW_SECONDS,
+                    help='freshness duration for foreign-MAC coverage (default: 180)')
+    ap.add_argument('--foreign-plus-coverage', type=float, default=.60,
+                    help='strict foreign coverage fraction required for F+ (default: .60)')
     ap.add_argument("--session", default="latest", help="latest (default), all, or an exact logger session ID")
     ap.add_argument("--since", help="inclusive ISO host timestamp with timezone")
     ap.add_argument("--until", help="inclusive ISO host timestamp with timezone")
@@ -881,7 +989,9 @@ def main() -> int:
         args.scout_links = True
     if args.ascii_table and args.json:
         ap.error('--ascii-table cannot be combined with --json')
-    if args.recent < 0 or args.tail_bytes < -1:
+    if (args.recent < 0 or args.tail_bytes < -1 or
+            args.foreign_freshness_seconds <= 0 or
+            not 0 <= args.foreign_plus_coverage <= 1):
         ap.error('--recent must be nonnegative and --tail-bytes must be -1 or greater')
     try:
         since = evidence.timestamp(args.since) if args.since else None
@@ -977,12 +1087,16 @@ def main() -> int:
             for note in caveats:
                 print('Note: ' + note)
         return 0
-    if args.convergence or args.reset_recovery or args.epoch_recovery:
+    if args.convergence or args.reset_recovery or args.epoch_recovery or args.foreign_convergence:
         print_current_home_distribution(datasets)
         if args.reset_recovery:
             print_reset_recovery(datasets, swarm_board_count())
         if args.epoch_recovery:
             print_epoch_recovery(datasets, swarm_board_count())
+        if args.foreign_convergence:
+            print_foreign_convergence(
+                datasets, swarm_board_count(), args.foreign_freshness_seconds,
+                args.foreign_plus_coverage)
         if not args.convergence:
             return 0
         print("Convergence dashboard | KPI = complete wake/sleep cycles after flush until 10/10 consensus")
