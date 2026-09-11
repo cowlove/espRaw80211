@@ -295,9 +295,17 @@ def main():
                 last_status = None
             elif now - reset_time > args.ack_timeout_seconds:
                 timestamped(
-                    f'reset id={reset_token} blocked after {now-reset_time:.0f}s; '
-                    f'missing={",".join(missing)}  '
+                    f'epoch-invalid id={reset_token} after {now-reset_time:.0f}s; '
+                    f'missing={",".join(missing)}; resuming ordinary monitoring  '
                     f'{foreign_status(datasets, now, foreign_max_age)}')
+                # A partial cold reset is valid protocol stress, but is not a
+                # clean-epoch measurement. Do not retain an unbounded pending
+                # transaction or retry individual boards; await the next
+                # sustained all-board convergence for a fresh attempt.
+                reset_time = reset_token = None
+                candidate_home = candidate_since = None
+                observation_floors = {}
+                last_status = None
             time.sleep(args.poll_seconds)
             continue
 
