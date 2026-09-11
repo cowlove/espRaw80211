@@ -15,6 +15,16 @@ class AnalyzerTailTests(unittest.TestCase):
     def test_default_is_one_megabyte(self):
         self.assertEqual(analyzer.DEFAULT_TAIL_BYTES, 1_000_000)
 
+    def test_tail_bytes_accepts_decimal_megabyte_suffix(self):
+        self.assertEqual(analyzer.parse_tail_bytes('2m'), 2_000_000)
+        self.assertEqual(analyzer.parse_tail_bytes('3M'), 3_000_000)
+        self.assertEqual(analyzer.parse_tail_bytes('123'), 123)
+        self.assertEqual(analyzer.parse_tail_bytes('-1'), -1)
+        with self.assertRaises(Exception):
+            analyzer.parse_tail_bytes('-1m')
+        with self.assertRaises(Exception):
+            analyzer.parse_tail_bytes('2mb')
+
     def test_local_read_is_bounded_suffix(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / 'large.log'

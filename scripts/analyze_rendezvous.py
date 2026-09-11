@@ -32,6 +32,21 @@ SCOUT_LINK_MIN_WIRE_VERSION = 7
 DEFAULT_FOREIGN_MAC = 'e072a1a23784'
 
 
+def parse_tail_bytes(value: str) -> int:
+    """Parse bytes or a decimal-megabyte suffix (for example ``2m``)."""
+    match = re.fullmatch(r'(-?\d+)([mM]?)', value.strip())
+    if not match:
+        raise argparse.ArgumentTypeError(
+            '--tail-bytes must be an integer byte count or an m-suffixed megabyte count')
+    count, suffix = match.groups()
+    result = int(count)
+    if suffix:
+        if result < 0:
+            raise argparse.ArgumentTypeError('--tail-bytes does not allow a negative m suffix')
+        result *= 1_000_000
+    return result
+
+
 @dataclass
 class Cycle:
     start: float
@@ -956,8 +971,8 @@ def main() -> int:
     ap.add_argument("--log-dir", type=Path, default=Path(__file__).resolve().parents[1])
     ap.add_argument("--remote-host", default="miner6.local")
     ap.add_argument("--remote-dir", default="~/src/espRaw80211")
-    ap.add_argument("--tail-bytes", type=int, default=DEFAULT_TAIL_BYTES,
-                    help="maximum suffix read per log; 0 or -1 reads the full file (default: 1000000)")
+    ap.add_argument("--tail-bytes", type=parse_tail_bytes, default=DEFAULT_TAIL_BYTES,
+                    help="maximum suffix read per log; append m for decimal MB; 0 or -1 reads full file (default: 1m)")
     ap.add_argument("--convergence", action="store_true", help="show cycles from reset execution to next 10/10 consensus")
     ap.add_argument("--reset-recovery", action="store_true", help="measure reset-wave execution to next emerging same-home consensus")
     ap.add_argument("--epoch-recovery", action="store_true",
