@@ -226,7 +226,7 @@ Use existing logs to classify 4+→7/7 wall time under the deployed policy.  Thi
 can proceed independently of new firmware, but must label unavailable evidence
 as unknown rather than infer a complete association table.
 
-### Slice D: passive hardware snapshots (implemented; deployment pending)
+### Slice D: passive hardware snapshots (deployed)
 
 Wire the proven capture path into firmware using a fixed-size RAM buffer and
 emit only after the radio interval.  First deploy with no policy changes.
@@ -246,6 +246,11 @@ fixed buffers add about 11.6 KiB RAM; no trace formatting occurs until the
 exchange interval has ended.  The parser also handles intervals that cross a
 logical-round boundary without treating their differing wake generations as
 separate traces.
+
+The first seven-board deployment produced complete trace boundaries on every
+board.  Initial decision-bearing intervals replayed exactly with valid table
+counts and fingerprints; zero-decision intervals emitted explicit complete
+end records as designed.
 
 ### Slice E: counterfactual and full-feedback experiments
 
