@@ -18,14 +18,20 @@ With the 120-second rendezvous cadence, the observed clean epochs show:
 - median first 4+ group to 7/7 consensus: about 480 seconds;
 - the 4+ to 7/7 portion is typically most of the total convergence interval.
 
-The existing logs record the deployed policy's relevant wake-boundary state:
+The existing compact hardware logs record much of the deployed policy's
+decision evidence and outcome:
 
-- complete claim and association matrices;
 - scan observations and remote beacon statistics;
 - direct scout and visitor evidence, including estimated member counts;
 - home credibility;
 - proposal creation, refresh, cancellation, commit, and rejection reason;
 - appointment completeness and exchange health.
+
+They do **not** currently record complete claim and association matrices.
+Those row-level dumps exist in legacy CSIM diagnostics, while normal hardware
+logging emits an association summary.  Historical hardware logs are therefore
+useful for attributing the deployed policy's delays, but are not sufficient for
+general snapshot replay without additional records.
 
 They do **not** retain every received ESP-NOW payload or its exact arrival
 order.  Therefore they cannot prove the later network trajectory of an
@@ -35,8 +41,11 @@ alternative policy after it changes a board's home beacon.
 
 ### 1. Hardware snapshot replay
 
-At the end of each wake/exchange window, replay alternate *local decision
-rules* against the exact state observed by the deployed firmware.
+At each appointment completion, replay alternate *local decision rules*
+against the exact pre-decision state observed by the deployed firmware.  This
+is the correct boundary: one awake interval can contain several appointments,
+and migration evaluation occurs as each home or scout appointment completes,
+not only at the end of the whole interval.
 
 Examples:
 
@@ -45,9 +54,9 @@ Examples:
 - different requirements for direct scout versus visitor evidence;
 - proposal replacement/cancellation rules.
 
-This answers: *would this board have made a different decision at this observed
-wake boundary?*  It exposes which 4/3 tails are caused by lack of qualifying
-evidence versus intentional policy delay.
+This answers: *would this board have made a different decision at this
+observed appointment boundary?*  It exposes which 4/3 tails are caused by lack
+of qualifying evidence versus intentional policy delay.
 
 It does not answer: *what reception opportunities would exist after all of
 those different decisions feed back into later schedules?*
@@ -79,17 +88,33 @@ or stability should advance to the hardware farm.
 
 ### Always-on compact decision snapshots
 
-At each decision boundary, emit a compact, parseable snapshot containing:
+At each appointment decision boundary, capture a compact, parseable snapshot
+containing:
 
+- incarnation, logical round, exchange sequence, appointment index and kind;
 - current home and estimated home membership;
 - directly observed candidate beacon(s) and estimated membership;
 - evidence source (`scout` or `visitor`) and full/healthy status;
 - credibility and pending proposal state;
 - selected action and rejection/cancellation reason.
 
-These records should be sufficient to implement hardware snapshot replay and
-remain compact enough for continuous logging.  They should describe semantic
-state, not raw radio frames.
+The snapshot must describe the state *before* the action and the deployed
+action separately.  Association rows used to calculate group estimates should
+be emitted once per exchange under a snapshot ID; appointment records can
+reference that ID instead of duplicating the table.  Include a stable state
+fingerprint so missing/truncated rows are detectable.
+
+Capture records into a small fixed-size RAM buffer and emit them only after the
+radio interval ends.  Serial formatting during an appointment would perturb
+the timing being measured.  The number of planned appointments is bounded, so
+the buffer can be bounded too; an overflow marker is mandatory.
+
+These records should be sufficient to replay the current group-size,
+tie-break, evidence, credibility, and proposal policies while remaining
+compact enough for continuous logging.  They should describe semantic state,
+not raw radio frames.  More experimental policies that depend on information
+not represented in the snapshot must be declared unsupported rather than
+silently approximated.
 
 ### Sampled semantic input traces
 
@@ -106,6 +131,30 @@ promiscuous packet: serial volume and logging work must not perturb the timing
 experiment.  A bounded sampled trace gives replay-quality ground truth for
 selected wakes while the always-on snapshots cover all wakes.
 
+Sampled semantic tracing is a second phase, not a prerequisite for the first
+group-migration experiments.  Begin with appointment snapshots, measure their
+UART/storage cost, and add sampled inputs only if the snapshots leave a
+specific ambiguity.
+
+## Replay implementation
+
+Avoid reimplementing migration policy independently in Python.  Extract or
+retain the decision rules as pure production C++ functions, and build a small
+host replay executable that consumes normalized snapshots and invokes those
+same functions.  The Python analyzer should reconstruct snapshots, select
+cohorts, and summarize results; the production policy remains the decision
+oracle.
+
+Before evaluating alternatives, replay the deployed policy and require it to
+reproduce the logged action and reason.  Any mismatch indicates an incomplete
+snapshot, parser error, or policy/version mismatch and excludes that record
+from counterfactual analysis.
+
+Counterfactual hardware replay is valid only until the first alternative action
+diverges from the deployed action.  Later physical observations came from the
+deployed trajectory and must not be presented as the alternate policy's future.
+CSIM is responsible for following that changed trajectory.
+
 ## Analyzer work
 
 Add a 4+ convergence-tail report that, per clean epoch, identifies:
@@ -121,14 +170,27 @@ initial topology, BSSID pair, appointment source, and F+/F− foreign-board
 classification.  A snapshot-replay mode can then report how often an
 alternative policy would disagree with the deployed action.
 
+The first historical-log report requires no firmware change.  It should
+attribute each observed 4+→7/7 tail among:
+
+- no qualifying cross-group opportunity yet;
+- qualifying evidence rejected by group ordering or freshness;
+- proposal/credibility confirmation in progress;
+- proposal invalidation, cancellation, or replacement;
+- migration completed but consensus not yet visible.
+
 ## Decision sequence
 
-1. Implement analyzer reconstruction of existing 4+ tails.
-2. Add always-on compact decision snapshots and validate their log cost.
-3. Use historical and new snapshots to rank candidate policy changes.
-4. Implement the best candidates in CSIM and run multi-seed full-feedback
-   comparisons.
-5. Deploy one conservative candidate to the farm; evaluate convergence,
+1. Implement analyzer reconstruction of existing 4+ tails using the evidence
+   already logged.
+2. Define and test a versioned appointment-snapshot schema; make CSIM emit it
+   first and prove replay of the deployed action.
+3. Add buffered always-on snapshots to hardware and validate completeness,
+   timing impact, UART volume, and truncation handling.
+4. Use new hardware snapshots to rank candidate policy changes.
+5. Implement the best candidates in CSIM and run paired, multi-seed
+   full-feedback comparisons.
+6. Deploy one conservative candidate to the farm; evaluate convergence,
    recovery, and stability before changing another parameter.
 
 No exchange or beacon window shortening is part of this work.
