@@ -194,3 +194,47 @@ attribute each observed 4+→7/7 tail among:
    recovery, and stability before changing another parameter.
 
 No exchange or beacon window shortening is part of this work.
+
+## Implementation slices
+
+Keep each slice independently testable and deployable:
+
+### Slice A: host decision model (complete)
+
+`appointmentDecisionSnapshot.h` defines the versioned pre-decision state,
+bounded appointment buffer, ordering rule, and replay outcome.  Its host test
+exercises the current singleton, ordering, proposal, cancellation, activation,
+schema-version, incomplete-row, and overflow branches.  This header is not yet
+wired into firmware and therefore cannot change live behavior.
+
+### Slice B: CSIM snapshot proof
+
+Instrument CSIM appointment boundaries, emit association rows plus decision
+snapshots, parse them, and require replay to reproduce every deployed action.
+Include multiple appointments in one interval and deliberately truncated trace
+fixtures.  This proves the schema before adding hardware UART traffic.
+
+### Slice C: historical tail attribution
+
+Use existing logs to classify 4+→7/7 wall time under the deployed policy.  This
+can proceed independently of new firmware, but must label unavailable evidence
+as unknown rather than infer a complete association table.
+
+### Slice D: passive hardware snapshots
+
+Wire the proven capture path into firmware using a fixed-size RAM buffer and
+emit only after the radio interval.  First deploy with no policy changes.
+Compare timing, log volume, replay completeness, and convergence statistics
+against the pre-deployment baseline.
+
+### Slice E: counterfactual and full-feedback experiments
+
+Rank one-step policy disagreements from hardware snapshots, then implement the
+promising candidates in CSIM and run paired seeds.  Only a candidate that
+preserves convergence probability and stability advances to hardware.
+
+### Optional slice F: sampled semantic inputs
+
+Add bounded sampled input traces only if appointment snapshots expose a
+specific unresolved ambiguity.  They are not required for the first 4/3 policy
+experiments.
