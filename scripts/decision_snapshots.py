@@ -13,13 +13,21 @@ SNAPSHOT = re.compile(
     r"src=(?P<src>\S+) h=(?P<h>[0-9a-f]+) hm=(?P<hm>\d+) "
     r"t=(?P<t>[0-9a-f]+) tm=(?P<tm>\d+) pb=(?P<pb>[0-9a-f]+) "
     r"ph=(?P<ph>[0-9a-f]+) pm=(?P<pm>\d+) pa=(?P<pa>\d+) "
-    r"n=(?P<n>\d+) q=(?P<q>[0-9a-f]+) actual=(?P<actual>\S+) "
+    r"tv=(?P<tv>\d+) n=(?P<n>\d+) q=(?P<q>[0-9a-f]+) actual=(?P<actual>\S+) "
     r"replay=(?P<replay>\S+)"
+)
+TABLE = re.compile(
+    r"@vt v=(?P<v>\d+) e=(?P<e>[0-9a-f]+) w=(?P<w>\d+) "
+    r"x=(?P<x>\d+) t=(?P<t>\d+) n=(?P<n>\d+) q=(?P<q>[0-9a-f]+)"
 )
 ROW = re.compile(
     r"@vrow e=(?P<e>[0-9a-f]+) w=(?P<w>\d+) x=(?P<x>\d+) "
-    r"i=(?P<i>\d+) o=(?P<o>\d+) m=(?P<m>[0-9a-f]+) "
+    r"t=(?P<t>\d+) r=(?P<r>\d+) m=(?P<m>[0-9a-f]+) "
     r"b=(?P<b>[0-9a-f]+) g=(?P<g>\d+) a=(?P<a>\d+) z=(?P<z>[0-9a-f]+)"
+)
+END = re.compile(
+    r"@vend e=(?P<e>[0-9a-f]+) w=(?P<w>\d+) x=(?P<x>\d+) "
+    r"tables=(?P<tables>\d+) decisions=(?P<decisions>\d+) overflow=(?P<overflow>[01])"
 )
 MASK64 = (1 << 64) - 1
 
@@ -29,6 +37,16 @@ def _key(values: dict[str, str]) -> tuple[int, int, int, int, int]:
         int(values["e"], 16), int(values["w"]), int(values["x"]),
         int(values["i"]), int(values["o"]),
     )
+
+
+def _exchange_key(values: dict[str, str]) -> tuple[int, int]:
+    # One merged exchange interval can cross a logical-round boundary, so its
+    # decisions may legitimately carry different wakeGeneration values.
+    return int(values["e"], 16), int(values["x"])
+
+
+def _table_key(values: dict[str, str]) -> tuple[int, int, int]:
+    return (*_exchange_key(values), int(values["t"]))
 
 
 def _mix(value: int, item: int) -> int:
@@ -66,13 +84,31 @@ class ParsedSnapshot:
 
 def parse_lines(lines: list[str]) -> list[ParsedSnapshot]:
     snapshots: dict[tuple[int, int, int, int, int], ParsedSnapshot] = {}
-    pending_rows: dict[tuple[int, int, int, int, int], list[dict[str, str]]] = {}
+    tables: dict[tuple[int, int, int], dict[str, object]] = {}
+    pending_rows: dict[tuple[int, int, int], list[dict[str, str]]] = {}
+    ends: dict[tuple[int, int], dict[str, str]] = {}
     order: list[tuple[int, int, int, int, int]] = []
     for line in lines:
         row_match = ROW.search(line)
         if row_match:
             values = row_match.groupdict()
-            pending_rows.setdefault(_key(values), []).append(values)
+            pending_rows.setdefault(_table_key(values), []).append(values)
+            continue
+        table_match = TABLE.search(line)
+        if table_match:
+            values = table_match.groupdict()
+            key = _table_key(values)
+            if key in tables:
+                raise ValueError(f"duplicate association table {key}")
+            tables[key] = {"fields": values, "rows": []}
+            continue
+        end_match = END.search(line)
+        if end_match:
+            values = end_match.groupdict()
+            key = _exchange_key(values)
+            if key in ends:
+                raise ValueError(f"duplicate decision trace end {key}")
+            ends[key] = values
             continue
         snapshot_match = SNAPSHOT.search(line)
         if not snapshot_match:
@@ -84,9 +120,44 @@ def parse_lines(lines: list[str]) -> list[ParsedSnapshot]:
         snapshots[key] = ParsedSnapshot(values)
         order.append(key)
     for key, rows in pending_rows.items():
-        if key not in snapshots:
-            raise ValueError(f"association rows without snapshot {key}")
-        snapshots[key].rows.extend(rows)
+        if key not in tables:
+            raise ValueError(f"association rows without table {key}")
+        rows.sort(key=lambda row: int(row["r"]))
+        if [int(row["r"]) for row in rows] != list(range(len(rows))):
+            raise ValueError(f"non-contiguous association rows {key}")
+        tables[key]["rows"] = rows
+    for key, table in tables.items():
+        fields = table["fields"]
+        rows = table["rows"]
+        probe = ParsedSnapshot({
+            "v": fields["v"], "actual": "none", "replay": "none",
+            "n": fields["n"], "q": fields["q"],
+        }, rows)
+        probe.validate()
+    for snapshot in snapshots.values():
+        table_key = (*_exchange_key(snapshot.fields), int(snapshot.fields["tv"]))
+        if table_key not in tables:
+            raise ValueError(f"snapshot without association table {table_key}")
+        table = tables[table_key]
+        if (snapshot.fields["n"] != table["fields"]["n"] or
+                snapshot.fields["q"] != table["fields"]["q"]):
+            raise ValueError(f"snapshot/table metadata mismatch {table_key}")
+        snapshot.rows.extend(table["rows"])
+    by_exchange: dict[tuple[int, int], list[ParsedSnapshot]] = {}
+    for snapshot in snapshots.values():
+        by_exchange.setdefault(_exchange_key(snapshot.fields), []).append(snapshot)
+    for key, end in ends.items():
+        if int(end["overflow"]):
+            raise ValueError(f"decision trace overflow {key}")
+        table_count = sum(1 for table_key in tables if table_key[:2] == key)
+        decision_count = len(by_exchange.get(key, []))
+        if table_count != int(end["tables"]):
+            raise ValueError(f"table count mismatch {key}")
+        if decision_count != int(end["decisions"]):
+            raise ValueError(f"decision count mismatch {key}")
+    for key in by_exchange:
+        if key not in ends:
+            raise ValueError(f"decision trace missing end {key}")
     result = [snapshots[key] for key in order]
     for snapshot in result:
         snapshot.validate()

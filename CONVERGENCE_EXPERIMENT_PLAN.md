@@ -226,7 +226,7 @@ Use existing logs to classify 4+→7/7 wall time under the deployed policy.  Thi
 can proceed independently of new firmware, but must label unavailable evidence
 as unknown rather than infer a complete association table.
 
-### Slice D: passive hardware snapshots
+### Slice D: passive hardware snapshots (implemented; deployment pending)
 
 Wire the proven capture path into firmware using a fixed-size RAM buffer and
 emit only after the radio interval.  First deploy with no policy changes.
@@ -238,6 +238,14 @@ association table version once per interval, assign it a snapshot ID, and let
 each buffered appointment decision reference that ID.  Emit all records after
 ESP-NOW stops, followed by an explicit end/count record.  The host parser must
 reject an incomplete set rather than treating it as replayable evidence.
+
+The implementation uses eight table-version slots and 40 decision slots per
+interval.  Three five-hour CSIM runs observed at most two of each.  Overflow is
+non-fatal to rendezvous behavior but makes that trace explicitly invalid.  The
+fixed buffers add about 11.6 KiB RAM; no trace formatting occurs until the
+exchange interval has ended.  The parser also handles intervals that cross a
+logical-round boundary without treating their differing wake generations as
+separate traces.
 
 ### Slice E: counterfactual and full-feedback experiments
 

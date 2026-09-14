@@ -433,10 +433,43 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     bool espNowStarted = false;
     bool singletonAggressiveWake = false;
     uint64_t beaconReceivedAtUsec = 0;
-#ifdef CSIM
-    uint8_t csimAppointmentIndex = 0;
-    uint8_t csimDecisionOrdinal = 0;
-#endif
+    static constexpr size_t decisionTraceMaxDecisions =
+        maximumPlanAppointments + 8;
+    // A table version is created only when decision-relevant association state
+    // changes between appointment decisions. Eight is well above the observed
+    // maximum of two across long CSIM runs while preserving ESP32 DRAM margin.
+    static constexpr size_t decisionTraceMaxTables = 8;
+    struct __attribute__((packed)) DecisionTraceAssociation {
+        uint64_t originMac = 0;
+        uint64_t selectedBeacon = 0;
+        uint32_t originGeneration = 0;
+        uint32_t ageCycles = 0;
+        uint32_t originEpoch = 0;
+    };
+    struct DecisionTraceTable {
+        uint32_t incarnation = 0;
+        uint32_t wakeGeneration = 0;
+        uint32_t exchangeSequence = 0;
+        uint64_t fingerprint = 0;
+        uint8_t count = 0;
+        DecisionTraceAssociation rows[associationTableSize] = {};
+    };
+    struct DecisionTraceDecision {
+        AppointmentDecisionSnapshot::Snapshot snapshot{};
+        AppointmentDecisionSnapshot::Action actual =
+            AppointmentDecisionSnapshot::Action::InvalidSnapshot;
+        uint8_t source = 0;
+    };
+    DecisionTraceTable decisionTraceTables[decisionTraceMaxTables] = {};
+    DecisionTraceDecision decisionTraceDecisions[decisionTraceMaxDecisions] = {};
+    uint8_t decisionTraceTableCount = 0;
+    uint8_t decisionTraceDecisionCount = 0;
+    uint8_t decisionTraceAppointmentIndex = 0;
+    uint8_t decisionTraceOrdinal = 0;
+    uint32_t decisionTraceIncarnation = 0;
+    uint32_t decisionTraceWakeGeneration = 0;
+    uint32_t decisionTraceExchangeSequence = 0;
+    bool decisionTraceOverflow = false;
 
     void clearRendezvousTestState() {
         spiffsBeacon = (uint64_t)0;
@@ -771,13 +804,73 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         return count;
     }
 
-#ifdef CSIM
-    static uint64_t csimSnapshotHashValue(uint64_t hash, uint64_t value) {
+    static uint64_t decisionTraceHashValue(uint64_t hash, uint64_t value) {
         hash ^= value;
         return hash * 1099511628211ULL;
     }
 
-    AppointmentDecisionSnapshot::Snapshot csimDecisionSnapshot(
+    void resetDecisionTrace() {
+        decisionTraceTableCount = 0;
+        decisionTraceDecisionCount = 0;
+        decisionTraceAppointmentIndex = 0;
+        decisionTraceOrdinal = 0;
+        decisionTraceIncarnation = incarnation;
+        decisionTraceWakeGeneration = wakeGeneration;
+        decisionTraceExchangeSequence = exchangeSequence;
+        decisionTraceOverflow = false;
+    }
+
+    uint8_t decisionTraceTableVersion(uint8_t &rowCount,
+                                      uint64_t &fingerprint) {
+        DecisionTraceTable candidate;
+        candidate.incarnation = incarnation;
+        candidate.wakeGeneration = wakeGeneration;
+        candidate.exchangeSequence = exchangeSequence;
+        fingerprint = 1469598103934665603ULL;
+        for (const BeaconAssociation &association : associations) {
+            if (!association.originMac) continue;
+            if (candidate.count == associationTableSize) {
+                decisionTraceOverflow = true;
+                return UINT8_MAX;
+            }
+            DecisionTraceAssociation &row = candidate.rows[candidate.count++];
+            row.originMac = association.originMac;
+            row.selectedBeacon = association.selectedBeacon;
+            row.originGeneration = association.originGeneration;
+            row.ageCycles = associationAgeCycles(association);
+            row.originEpoch = association.originEpoch;
+            fingerprint = decisionTraceHashValue(fingerprint, row.originMac);
+            fingerprint = decisionTraceHashValue(fingerprint,
+                                                  row.selectedBeacon);
+            fingerprint = decisionTraceHashValue(fingerprint,
+                                                  row.originGeneration);
+            fingerprint = decisionTraceHashValue(fingerprint, row.ageCycles);
+            fingerprint = decisionTraceHashValue(fingerprint, row.originEpoch);
+        }
+        rowCount = candidate.count;
+        candidate.fingerprint = rowCount ? fingerprint : 0;
+        fingerprint = candidate.fingerprint;
+        for (uint8_t i = 0; i < decisionTraceTableCount; ++i) {
+            const DecisionTraceTable &stored = decisionTraceTables[i];
+            if (stored.incarnation == candidate.incarnation &&
+                stored.wakeGeneration == candidate.wakeGeneration &&
+                stored.exchangeSequence == candidate.exchangeSequence &&
+                stored.count == candidate.count &&
+                stored.fingerprint == candidate.fingerprint &&
+                memcmp(stored.rows, candidate.rows,
+                       candidate.count * sizeof(candidate.rows[0])) == 0)
+                return i;
+        }
+        if (decisionTraceTableCount == decisionTraceMaxTables) {
+            decisionTraceOverflow = true;
+            return UINT8_MAX;
+        }
+        const uint8_t version = decisionTraceTableCount++;
+        decisionTraceTables[version] = candidate;
+        return version;
+    }
+
+    AppointmentDecisionSnapshot::Snapshot captureDecisionSnapshot(
             AppointmentDecisionSnapshot::DecisionKind kind,
             uint64_t homeBssid, uint64_t targetBssid = 0) {
         AppointmentDecisionSnapshot::Snapshot snapshot;
@@ -785,8 +878,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         snapshot.incarnation = incarnation;
         snapshot.wakeGeneration = wakeGeneration;
         snapshot.exchangeSequence = exchangeSequence;
-        snapshot.appointmentIndex = csimAppointmentIndex;
-        snapshot.decisionOrdinal = csimDecisionOrdinal;
+        snapshot.appointmentIndex = decisionTraceAppointmentIndex;
+        snapshot.decisionOrdinal = decisionTraceOrdinal;
         snapshot.homeBssid = homeBssid;
         snapshot.homeMembers = listenerCount(homeBssid);
         snapshot.targetBssid = targetBssid;
@@ -795,63 +888,100 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         snapshot.pendingHome = spiffsProposalHome.read();
         snapshot.pendingMembers = spiffsProposalMembers.read();
         snapshot.pendingActRound = spiffsProposalActRound.read();
-        uint64_t fingerprint = 1469598103934665603ULL;
-        for (const BeaconAssociation &association : associations) {
-            if (!association.originMac) continue;
-            ++snapshot.associationExpectedRows;
-            ++snapshot.associationObservedRows;
-            fingerprint = csimSnapshotHashValue(fingerprint,
-                                                 association.originMac);
-            fingerprint = csimSnapshotHashValue(fingerprint,
-                                                 association.selectedBeacon);
-            fingerprint = csimSnapshotHashValue(fingerprint,
-                                                 association.originGeneration);
-            fingerprint = csimSnapshotHashValue(
-                fingerprint, associationAgeCycles(association));
-            fingerprint = csimSnapshotHashValue(fingerprint,
-                                                 association.originEpoch);
-        }
-        snapshot.associationFingerprint = snapshot.associationExpectedRows ?
-            fingerprint : 0;
+        uint8_t rows = 0;
+        snapshot.associationVersion = decisionTraceTableVersion(
+            rows, snapshot.associationFingerprint);
+        snapshot.associationExpectedRows = rows;
+        snapshot.associationObservedRows =
+            snapshot.associationVersion == UINT8_MAX ? 0 : rows;
         return snapshot;
     }
 
-    void csimVerifyDecision(
+    static uint8_t decisionSourceCode(const char *source) {
+        if (strcmp(source, "direct") == 0) return 1;
+        if (strcmp(source, "visitor") == 0) return 2;
+        if (strcmp(source, "commit-check") == 0) return 3;
+        return 0;
+    }
+
+    static const char *decisionSourceName(uint8_t source) {
+        if (source == 1) return "direct";
+        if (source == 2) return "visitor";
+        if (source == 3) return "commit-check";
+        return "unknown";
+    }
+
+    void recordDecision(
             const AppointmentDecisionSnapshot::Snapshot &snapshot,
             AppointmentDecisionSnapshot::Action actual,
             const char *source) {
         using namespace AppointmentDecisionSnapshot;
         const Action predicted = replay(snapshot);
-        out("@v v=%u e=%08x w=%u x=%u i=%u o=%u k=%u src=%s h=%012llx hm=%u t=%012llx tm=%u pb=%012llx ph=%012llx pm=%u pa=%u n=%u q=%llx actual=%s replay=%s",
-            snapshot.version, snapshot.incarnation, snapshot.wakeGeneration,
-            snapshot.exchangeSequence, snapshot.appointmentIndex,
-            snapshot.decisionOrdinal, (unsigned)snapshot.kind, source,
-            (unsigned long long)snapshot.homeBssid, snapshot.homeMembers,
-            (unsigned long long)snapshot.targetBssid, snapshot.targetMembers,
-            (unsigned long long)snapshot.pendingBssid,
-            (unsigned long long)snapshot.pendingHome, snapshot.pendingMembers,
-            snapshot.pendingActRound, snapshot.associationExpectedRows,
-            (unsigned long long)snapshot.associationFingerprint,
-            actionName(actual), actionName(predicted));
-        for (const BeaconAssociation &association : associations) {
-            if (!association.originMac) continue;
-            out("@vrow e=%08x w=%u x=%u i=%u o=%u m=%012llx b=%012llx g=%u a=%u z=%08x",
-                snapshot.incarnation, snapshot.wakeGeneration,
-                snapshot.exchangeSequence, snapshot.appointmentIndex,
-                snapshot.decisionOrdinal,
-                (unsigned long long)association.originMac,
-                (unsigned long long)association.selectedBeacon,
-                association.originGeneration,
-                associationAgeCycles(association), association.originEpoch);
-        }
+#ifdef CSIM
         if (predicted != actual) {
             out("CSIM SNAPSHOT REPLAY MISMATCH actual=%s replay=%s",
                 actionName(actual), actionName(predicted));
             CSIM_ASSERT(predicted == actual);
         }
-        ++csimDecisionOrdinal;
-    }
 #endif
+        if (decisionTraceDecisionCount == decisionTraceMaxDecisions ||
+            snapshot.associationVersion == UINT8_MAX) {
+            decisionTraceOverflow = true;
+            ++decisionTraceOrdinal;
+            return;
+        }
+        DecisionTraceDecision &record =
+            decisionTraceDecisions[decisionTraceDecisionCount++];
+        record.snapshot = snapshot;
+        record.actual = actual;
+        record.source = decisionSourceCode(source);
+        ++decisionTraceOrdinal;
+    }
+
+    void emitDecisionTrace() {
+        using namespace AppointmentDecisionSnapshot;
+        for (uint8_t table = 0; table < decisionTraceTableCount; ++table) {
+            const DecisionTraceTable &version = decisionTraceTables[table];
+            out("@vt v=%u e=%08x w=%u x=%u t=%u n=%u q=%llx",
+                schemaVersion, version.incarnation, version.wakeGeneration,
+                version.exchangeSequence, table, version.count,
+                (unsigned long long)version.fingerprint);
+            for (uint8_t rowIndex = 0; rowIndex < version.count; ++rowIndex) {
+                const DecisionTraceAssociation &row = version.rows[rowIndex];
+                out("@vrow e=%08x w=%u x=%u t=%u r=%u m=%012llx b=%012llx g=%u a=%u z=%08x",
+                    version.incarnation, version.wakeGeneration,
+                    version.exchangeSequence, table,
+                    rowIndex, (unsigned long long)row.originMac,
+                    (unsigned long long)row.selectedBeacon,
+                    row.originGeneration, row.ageCycles, row.originEpoch);
+            }
+        }
+        for (uint8_t i = 0; i < decisionTraceDecisionCount; ++i) {
+            const DecisionTraceDecision &record = decisionTraceDecisions[i];
+            const Snapshot &snapshot = record.snapshot;
+            const Action predicted = replay(snapshot);
+            out("@v v=%u e=%08x w=%u x=%u i=%u o=%u k=%u src=%s h=%012llx hm=%u t=%012llx tm=%u pb=%012llx ph=%012llx pm=%u pa=%u tv=%u n=%u q=%llx actual=%s replay=%s",
+                snapshot.version, snapshot.incarnation,
+                snapshot.wakeGeneration, snapshot.exchangeSequence,
+                snapshot.appointmentIndex, snapshot.decisionOrdinal,
+                (unsigned)snapshot.kind, decisionSourceName(record.source),
+                (unsigned long long)snapshot.homeBssid, snapshot.homeMembers,
+                (unsigned long long)snapshot.targetBssid,
+                snapshot.targetMembers,
+                (unsigned long long)snapshot.pendingBssid,
+                (unsigned long long)snapshot.pendingHome,
+                snapshot.pendingMembers, snapshot.pendingActRound,
+                snapshot.associationVersion,
+                snapshot.associationExpectedRows,
+                (unsigned long long)snapshot.associationFingerprint,
+                actionName(record.actual), actionName(predicted));
+        }
+        out("@vend e=%08x w=%u x=%u tables=%u decisions=%u overflow=%u",
+            decisionTraceIncarnation, decisionTraceWakeGeneration,
+            decisionTraceExchangeSequence,
+            decisionTraceTableCount, decisionTraceDecisionCount,
+            decisionTraceOverflow ? 1U : 0U);
+    }
 
     void dumpAssociationTable(uint64_t homeBssid) const {
 #ifdef CSIM
@@ -1170,20 +1300,16 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 
     void observeGroupForMigration(uint64_t homeBssid, uint64_t targetBssid,
                                   const char *source) {
-#ifdef CSIM
-        const auto decisionSnapshot = csimDecisionSnapshot(
+        const auto decisionSnapshot = captureDecisionSnapshot(
             AppointmentDecisionSnapshot::DecisionKind::ObserveCandidate,
             homeBssid, targetBssid);
-#endif
         const size_t homeMembers = listenerCount(homeBssid);
         const size_t targetMembers = listenerCount(targetBssid);
         if (SingletonJoinPolicy::mayCoalesce(homeMembers, targetMembers,
                                              homeBssid, targetBssid)) {
-#ifdef CSIM
-            csimVerifyDecision(decisionSnapshot,
+            recordDecision(decisionSnapshot,
                 AppointmentDecisionSnapshot::Action::CoalesceSingletons,
                 source);
-#endif
             out("singleton-coalesce %s target %012llx from %012llx tie-break lower-bssid",
                 source, (unsigned long long)targetBssid,
                 (unsigned long long)homeBssid);
@@ -1191,11 +1317,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             return;
         }
         if (SingletonJoinPolicy::mayAdopt(homeMembers, targetMembers)) {
-#ifdef CSIM
-            csimVerifyDecision(decisionSnapshot,
+            recordDecision(decisionSnapshot,
                 AppointmentDecisionSnapshot::Action::JoinLargerGroup,
                 source);
-#endif
             out("singleton-join %s target %012llx members %u from %012llx",
                 source,
                 (unsigned long long)targetBssid, (unsigned)targetMembers,
@@ -1209,21 +1333,17 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 targetBssid > homeBssid ? "equal-size-higher-bssid" :
                 "not-larger";
             if (spiffsProposalBeacon.read() == targetBssid) {
-#ifdef CSIM
-                csimVerifyDecision(decisionSnapshot,
+                recordDecision(decisionSnapshot,
                     AppointmentDecisionSnapshot::Action::CancelNotPreferred,
                     source);
-#endif
                 out("migration-proposal canceled target %012llx target-members %u home-members %u reason %s",
                     (unsigned long long)targetBssid, (unsigned)targetMembers,
                     (unsigned)homeMembers, reason);
                 clearMigrationProposal();
             } else {
-#ifdef CSIM
-                csimVerifyDecision(decisionSnapshot,
+                recordDecision(decisionSnapshot,
                     AppointmentDecisionSnapshot::Action::RejectNotPreferred,
                     source);
-#endif
                 out("migration-rejected target %012llx target-members %u home-members %u reason %s",
                     (unsigned long long)targetBssid, (unsigned)targetMembers,
                     (unsigned)homeMembers, reason);
@@ -1234,11 +1354,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             spiffsHomeCredibility.read() : 0;
         const uint64_t pending = spiffsProposalBeacon.read();
         if (pending == targetBssid && spiffsProposalHome.read() == homeBssid) {
-#ifdef CSIM
-            csimVerifyDecision(decisionSnapshot,
+            recordDecision(decisionSnapshot,
                 AppointmentDecisionSnapshot::Action::RefreshProposal,
                 source);
-#endif
             spiffsProposalMembers = (uint32_t)targetMembers;
             out("migration-proposal refreshed target %012llx target-members %u home-members %u act-round %u",
                 (unsigned long long)targetBssid, (unsigned)targetMembers,
@@ -1248,21 +1366,17 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         if (pending && !SingletonJoinPolicy::groupPreferred(
                 targetMembers, targetBssid,
                 spiffsProposalMembers.read(), pending)) {
-#ifdef CSIM
-            csimVerifyDecision(decisionSnapshot,
+            recordDecision(decisionSnapshot,
                 AppointmentDecisionSnapshot::Action::RejectWeakerThanPending,
                 source);
-#endif
             out("migration-rejected target %012llx target-members %u pending %012llx pending-members %u reason weaker-than-pending",
                 (unsigned long long)targetBssid, (unsigned)targetMembers,
                 (unsigned long long)pending, spiffsProposalMembers.read());
             return;
         }
         const uint32_t delay = SingletonJoinPolicy::proposalDelay(credibility);
-#ifdef CSIM
-        csimVerifyDecision(decisionSnapshot,
+        recordDecision(decisionSnapshot,
             AppointmentDecisionSnapshot::Action::StartProposal, source);
-#endif
         spiffsProposalBeacon = targetBssid;
         spiffsProposalHome = homeBssid;
         spiffsProposalActRound = wakeGeneration + delay;
@@ -1277,17 +1391,13 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     bool maybeCommitMigration(uint64_t homeBssid) {
         const uint64_t target = spiffsProposalBeacon.read();
         if (!target) return false;
-#ifdef CSIM
-        const auto decisionSnapshot = csimDecisionSnapshot(
+        const auto decisionSnapshot = captureDecisionSnapshot(
             AppointmentDecisionSnapshot::DecisionKind::CommitCheck,
             homeBssid);
-#endif
         if (spiffsProposalHome.read() != homeBssid) {
-#ifdef CSIM
-            csimVerifyDecision(decisionSnapshot,
+            recordDecision(decisionSnapshot,
                 AppointmentDecisionSnapshot::Action::CancelHomeChanged,
                 "commit-check");
-#endif
             out("migration-proposal canceled target %012llx reason home-changed",
                 (unsigned long long)target);
             clearMigrationProposal();
@@ -1297,11 +1407,9 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         if (!SingletonJoinPolicy::groupPreferred(
                 spiffsProposalMembers.read(), target,
                 homeMembers, homeBssid)) {
-#ifdef CSIM
-            csimVerifyDecision(decisionSnapshot,
+            recordDecision(decisionSnapshot,
                 AppointmentDecisionSnapshot::Action::CancelHomeCaughtUp,
                 "commit-check");
-#endif
             out("migration-proposal canceled target %012llx target-snapshot %u home-members %u reason home-caught-up",
                 (unsigned long long)target, spiffsProposalMembers.read(),
                 (unsigned)homeMembers);
@@ -1309,18 +1417,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             return false;
         }
         if (int32_t(wakeGeneration-spiffsProposalActRound.read()) < 0) {
-#ifdef CSIM
-            csimVerifyDecision(decisionSnapshot,
+            recordDecision(decisionSnapshot,
                 AppointmentDecisionSnapshot::Action::AwaitActivation,
                 "commit-check");
-#endif
             return false;
         }
-#ifdef CSIM
-        csimVerifyDecision(decisionSnapshot,
+        recordDecision(decisionSnapshot,
             AppointmentDecisionSnapshot::Action::CommitProposal,
             "commit-check");
-#endif
         out("migration-proposal committed target %012llx target-snapshot %u home-members %u credibility %u",
             (unsigned long long)target, spiffsProposalMembers.read(),
             (unsigned)homeMembers, spiffsHomeCredibility.read());
@@ -2249,9 +2353,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         if (!exchangeActive) {
             exchangeSequence = spiffsExchangeSequence.read() + 1;
             spiffsExchangeSequence = exchangeSequence;
-#ifdef CSIM
-            csimDecisionOrdinal = 0;
-#endif
+            resetDecisionTrace();
             targetBeacon = plannedHome;
             bool homePresent = false;
             for (size_t i = 0; i < executionPlan.appointmentCount(); ++i) {
@@ -2301,9 +2403,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         }
         for (size_t i = 0; i < executionPlan.appointmentCount(); ++i) {
             if (!(interval.appointments & (1ULL << i))) continue;
-#ifdef CSIM
-            csimAppointmentIndex = (uint8_t)i;
-#endif
+            decisionTraceAppointmentIndex = (uint8_t)i;
             const auto &a = executionPlan.appointment(i);
             auto &state = coverage[i];
             if (!state.started && now >= a.start) {
@@ -2411,6 +2511,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 (unsigned long long)elapsedInWindow(exchangeLastStateUsec, espNowStartUsec),
                 (unsigned long long)elapsedInWindow(exchangeLastDecisionUsec, espNowStartUsec),
                 (unsigned long long)exchangeDecisionSignature);
+        emitDecisionTrace();
 #ifdef CSIM
         if (csimLegacyDiagnostics)
             out("exchange complete interval %u", exchangeSequence);

@@ -48,6 +48,7 @@ struct Snapshot {
     uint32_t pendingActRound = 0;
     uint8_t associationExpectedRows = 0;
     uint8_t associationObservedRows = 0;
+    uint8_t associationVersion = 0;
     uint64_t associationFingerprint = 0;
 };
 
