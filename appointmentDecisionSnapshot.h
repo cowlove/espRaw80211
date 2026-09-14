@@ -37,6 +37,7 @@ struct Snapshot {
     uint32_t wakeGeneration = 0;
     uint32_t exchangeSequence = 0;
     uint8_t appointmentIndex = 0;
+    uint8_t decisionOrdinal = 0;
     uint64_t homeBssid = 0;
     uint32_t homeMembers = 0;
     uint64_t targetBssid = 0;
@@ -128,7 +129,28 @@ inline bool orderedAfter(const Snapshot &later, const Snapshot &earlier) {
         return later.wakeGeneration > earlier.wakeGeneration;
     if (later.exchangeSequence != earlier.exchangeSequence)
         return later.exchangeSequence > earlier.exchangeSequence;
-    return later.appointmentIndex > earlier.appointmentIndex;
+    if (later.appointmentIndex != earlier.appointmentIndex)
+        return later.appointmentIndex > earlier.appointmentIndex;
+    return later.decisionOrdinal > earlier.decisionOrdinal;
+}
+
+inline const char *actionName(Action action) {
+    switch (action) {
+        case Action::InvalidSnapshot: return "invalid";
+        case Action::NoAction: return "none";
+        case Action::CoalesceSingletons: return "coalesce";
+        case Action::JoinLargerGroup: return "join";
+        case Action::RejectNotPreferred: return "reject-not-preferred";
+        case Action::CancelNotPreferred: return "cancel-not-preferred";
+        case Action::RefreshProposal: return "refresh";
+        case Action::RejectWeakerThanPending: return "reject-weaker";
+        case Action::StartProposal: return "propose";
+        case Action::CancelHomeChanged: return "cancel-home-changed";
+        case Action::CancelHomeCaughtUp: return "cancel-home-caught-up";
+        case Action::AwaitActivation: return "await-activation";
+        case Action::CommitProposal: return "commit";
+    }
+    return "unknown";
 }
 
 } // namespace AppointmentDecisionSnapshot

@@ -207,12 +207,18 @@ exercises the current singleton, ordering, proposal, cancellation, activation,
 schema-version, incomplete-row, and overflow branches.  This header is not yet
 wired into firmware and therefore cannot change live behavior.
 
-### Slice B: CSIM snapshot proof
+### Slice B: CSIM snapshot proof (complete)
 
 Instrument CSIM appointment boundaries, emit association rows plus decision
 snapshots, parse them, and require replay to reproduce every deployed action.
 Include multiple appointments in one interval and deliberately truncated trace
 fixtures.  This proves the schema before adding hardware UART traffic.
+
+CSIM now emits `@v` decision records and keyed `@vrow` association rows.  A
+runtime assertion compares the replayed outcome with the branch actually
+taken, while `scripts/decision_snapshots.py` independently verifies schema
+version, row count, association fingerprint, and action equality.  The compact
+versus legacy compatibility test validates both forms on every run.
 
 ### Slice C: historical tail attribution
 
@@ -226,6 +232,12 @@ Wire the proven capture path into firmware using a fixed-size RAM buffer and
 emit only after the radio interval.  First deploy with no policy changes.
 Compare timing, log volume, replay completeness, and convergence statistics
 against the pre-deployment baseline.
+
+For hardware, avoid CSIM's deliberately verbose row duplication: capture each
+association table version once per interval, assign it a snapshot ID, and let
+each buffered appointment decision reference that ID.  Emit all records after
+ESP-NOW stops, followed by an explicit end/count record.  The host parser must
+reject an incomplete set rather than treating it as replayable evidence.
 
 ### Slice E: counterfactual and full-feedback experiments
 

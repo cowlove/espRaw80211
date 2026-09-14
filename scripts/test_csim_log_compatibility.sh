@@ -28,6 +28,11 @@ mkdir "$workspace/legacy" "$workspace/compact"
 "$script_dir/run_csim.sh" --seconds 360 --random-seed 41 \
     > "$workspace/compact/all.log" 2>/dev/null
 
+"$script_dir/decision_snapshots.py" "$workspace/legacy/all.log" \
+    --require-snapshots
+"$script_dir/decision_snapshots.py" "$workspace/compact/all.log" \
+    --require-snapshots
+
 if ! grep -Eq '@q b=[0-9a-f]{12} r=-?[0-9]+ n=[1-9][0-9]* a=[0-9]+ t=[0-9]+' \
         "$workspace/compact/all.log"; then
     echo 'compact CSIM log is missing a valid end-of-wake @q beacon record' >&2
