@@ -5,9 +5,9 @@
 
 namespace SingletonJoinPolicy {
 
-// CSIM may override this for policy experiments. Hardware retains the
-// production default of five logical rounds.
-inline uint32_t proposalDelayCap = 5;
+// CSIM may override this for policy experiments. Hardware uses a production
+// cap of three logical rounds.
+inline uint32_t proposalDelayCap = 3;
 
 // Positive evidence is useful even when a scout appointment began late. A
 // missing packet during a partial appointment is not negative evidence.
