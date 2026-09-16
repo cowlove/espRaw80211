@@ -235,6 +235,23 @@ verbatim to the generated CSIM command line:
 ./scripts/csim-benchmark.sh --iterations 200 --reception-scale 0.40
 ```
 
+For migration-policy experiments, `--controlled-43` holds a fixed four/three
+home split while normal exchanges mature the evidence tables.  After every
+board completes the configured warm-up rounds, CSIM seeds a common home
+credibility, releases migration simultaneously, and measures convergence from
+that release point.  A run is invalid unless at least one proposal actually
+has a credibility-dependent delay:
+
+```sh
+./scripts/csim-benchmark.sh --iterations 200 --seconds 5000 \
+  --controlled-43 --controlled-43-warmup-rounds 8 \
+  --controlled-43-credibility 12 --proposal-delay-cap 2
+```
+
+When the global convergence marker contains `controlled-elapsed=`, the
+benchmark reports that release-to-convergence duration instead of including
+the fixture warm-up.
+
 It reports the convergence success/timeout counts and the minimum, median,
 mean, p95, and maximum first-convergence times.
 

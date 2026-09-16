@@ -5,6 +5,10 @@
 
 namespace SingletonJoinPolicy {
 
+// CSIM may override this for policy experiments. Hardware retains the
+// production default of five logical rounds.
+inline uint32_t proposalDelayCap = 5;
+
 // Positive evidence is useful even when a scout appointment began late. A
 // missing packet during a partial appointment is not negative evidence.
 inline bool mayEvaluateScout(uint32_t directPacketsSelectingTarget) {
@@ -46,9 +50,14 @@ inline bool mayPropose(size_t homeMembers, uint64_t homeBssid,
                        homeMembers, homeBssid);
 }
 
-inline uint32_t proposalDelay(uint32_t homeCredibility) {
+inline uint32_t proposalDelayUncapped(uint32_t homeCredibility) {
     const uint32_t extra = homeCredibility / 4;
     return 2 + (extra > 3 ? 3 : extra);
+}
+
+inline uint32_t proposalDelay(uint32_t homeCredibility) {
+    const uint32_t delay = proposalDelayUncapped(homeCredibility);
+    return delay > proposalDelayCap ? proposalDelayCap : delay;
 }
 
 inline uint32_t reinforce(uint32_t credibility, bool heardDirectPeer) {

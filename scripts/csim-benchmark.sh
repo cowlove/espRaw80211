@@ -85,13 +85,19 @@ for seed in $(seq 1 "$iterations"); do
             "${csim_arguments[@]}" 2>/dev/null |
             awk '
                 /CSIM GLOBAL CONVERGENCE/ {
+                    controlled = ""
                     for (i = 1; i <= NF; i++) {
+                        if ($i ~ /^controlled-elapsed=/) {
+                            controlled = $i
+                            sub(/^controlled-elapsed=/, "", controlled)
+                        }
                         if ($i ~ /^time=/) {
-                            sub(/^time=/, "", $i)
-                            print $i
-                            exit
+                            absolute = $i
+                            sub(/^time=/, "", absolute)
                         }
                     }
+                    print controlled != "" ? controlled : absolute
+                    exit
                 }
             ' > "$results_dir/$seed"
     ) &

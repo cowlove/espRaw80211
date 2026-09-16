@@ -27,6 +27,26 @@
 
 #ifdef CSIM
 static bool csimLegacyDiagnostics = false;
+static bool csimControlled43 = false;
+static uint32_t csimControlled43MinCredibility = 12;
+static uint32_t csimControlled43WarmupRounds = 8;
+static constexpr uint32_t csimControlled43StateMagicValue = 0x43343331;
+static __attribute__((section("CSIM_RTC_MEM"))) uint32_t
+    csimControlled43StateMagic;
+static __attribute__((section("CSIM_RTC_MEM"))) bool
+    csimControlled43MigrationReleased;
+static __attribute__((section("CSIM_RTC_MEM"))) uint64_t
+    csimControlled43ReleaseUsec;
+static __attribute__((section("CSIM_RTC_MEM"))) uint32_t
+    csimControlled43DelayExposures;
+
+static void ensureCsimControlled43State() {
+    if (csimControlled43StateMagic == csimControlled43StateMagicValue) return;
+    csimControlled43StateMagic = csimControlled43StateMagicValue;
+    csimControlled43MigrationReleased = false;
+    csimControlled43ReleaseUsec = 0;
+    csimControlled43DelayExposures = 0;
+}
 #endif
 
 // Wi-Fi receive timestamps already use esp_timer_get_time(). Keep every
@@ -1300,6 +1320,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 
     void observeGroupForMigration(uint64_t homeBssid, uint64_t targetBssid,
                                   const char *source) {
+#ifdef CSIM
+        if (csimControlled43 && !csimControlled43MigrationReleased) {
+            out("csim-controlled-migration-suppressed source=%s home=%012llx target=%012llx",
+                source, (unsigned long long)homeBssid,
+                (unsigned long long)targetBssid);
+            return;
+        }
+#endif
         const auto decisionSnapshot = captureDecisionSnapshot(
             AppointmentDecisionSnapshot::DecisionKind::ObserveCandidate,
             homeBssid, targetBssid);
@@ -1375,6 +1403,16 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             return;
         }
         const uint32_t delay = SingletonJoinPolicy::proposalDelay(credibility);
+#ifdef CSIM
+        if (csimControlled43 &&
+            SingletonJoinPolicy::proposalDelayUncapped(credibility) > 2) {
+            ++csimControlled43DelayExposures;
+            out("csim-delay-exposure credibility=%u uncapped=%u selected=%u cap=%u",
+                credibility,
+                SingletonJoinPolicy::proposalDelayUncapped(credibility),
+                delay, SingletonJoinPolicy::proposalDelayCap);
+        }
+#endif
         recordDecision(decisionSnapshot,
             AppointmentDecisionSnapshot::Action::StartProposal, source);
         spiffsProposalBeacon = targetBssid;
@@ -1389,6 +1427,10 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     }
 
     bool maybeCommitMigration(uint64_t homeBssid) {
+#ifdef CSIM
+        if (csimControlled43 && !csimControlled43MigrationReleased)
+            return false;
+#endif
         const uint64_t target = spiffsProposalBeacon.read();
         if (!target) return false;
         const auto decisionSnapshot = captureDecisionSnapshot(
@@ -2659,6 +2701,30 @@ public:
         currentContext = saved;
         return home;
     }
+
+    uint32_t csimHomeCredibility() {
+        CsimContext *saved = currentContext;
+        currentContext = context;
+        const uint64_t home = spiffsBeacon.read();
+        const uint32_t credibility =
+            spiffsCredibilityHome.read() == home ?
+            spiffsHomeCredibility.read() : 0;
+        currentContext = saved;
+        return credibility;
+    }
+
+    uint32_t csimWakeGeneration() {
+        return wakeGeneration;
+    }
+
+    void csimSeedHomeCredibility(uint32_t credibility) {
+        CsimContext *saved = currentContext;
+        currentContext = context;
+        const uint64_t home = spiffsBeacon.read();
+        spiffsCredibilityHome = home;
+        spiffsHomeCredibility = credibility;
+        currentContext = saved;
+    }
 #endif
 
     explicit BeaconRendezvousContext(uint64_t address = 0) :
@@ -2730,6 +2796,17 @@ public:
 #endif
         SPIFFSVariableESP32Base::begin();
         if (coldResetStartsTestEpoch()) beginColdResetTestEpoch();
+#ifdef CSIM
+        ensureCsimControlled43State();
+        if (csimControlled43 && spiffsBeacon.read() == 0) {
+            clearRendezvousTestState();
+            spiffsColdEpochStarted = 1;
+            const uint8_t index = (uint8_t)((context->mac & 0xff) - 1);
+            spiffsBeacon = index < 4 ? 0x60a4b792e676ULL : 0x66a4b792e676ULL;
+            out("csim-controlled-start group=%u home=%012llx",
+                index < 4 ? 4U : 3U, (unsigned long long)spiffsBeacon.read());
+        }
+#endif
         if (spiffsTestSwarmCount.read() != testClusterSize) {
             // Do not inherit a streak/committed reset from a different oracle.
             spiffsTestConsensusCycles = 0;
@@ -2867,6 +2944,44 @@ struct PairwiseModelInstaller : public Csim_Module {
             }
             csimSingletonScoutAggressivenessMillionths =
                 (uint32_t)(value * 1000000.0 + 0.5);
+        } else if (strcmp(*arg, "--proposal-delay-cap") == 0) {
+            if (arg + 1 >= end) {
+                fprintf(stderr, "--proposal-delay-cap requires 2..5\n");
+                exit(2);
+            }
+            char *tail = nullptr;
+            const long value = strtol(*(++arg), &tail, 10);
+            if (!tail || *tail || value < 2 || value > 5) {
+                fprintf(stderr, "invalid --proposal-delay-cap value\n");
+                exit(2);
+            }
+            SingletonJoinPolicy::proposalDelayCap = (uint32_t)value;
+        } else if (strcmp(*arg, "--controlled-43") == 0) {
+            csimControlled43 = true;
+        } else if (strcmp(*arg, "--controlled-43-credibility") == 0) {
+            if (arg + 1 >= end) {
+                fprintf(stderr, "--controlled-43-credibility requires 4..12\n");
+                exit(2);
+            }
+            char *tail = nullptr;
+            const long value = strtol(*(++arg), &tail, 10);
+            if (!tail || *tail || value < 4 || value > 12) {
+                fprintf(stderr, "invalid --controlled-43-credibility value\n");
+                exit(2);
+            }
+            csimControlled43MinCredibility = (uint32_t)value;
+        } else if (strcmp(*arg, "--controlled-43-warmup-rounds") == 0) {
+            if (arg + 1 >= end) {
+                fprintf(stderr, "--controlled-43-warmup-rounds requires 1..100\n");
+                exit(2);
+            }
+            char *tail = nullptr;
+            const long value = strtol(*(++arg), &tail, 10);
+            if (!tail || *tail || value < 1 || value > 100) {
+                fprintf(stderr, "invalid --controlled-43-warmup-rounds value\n");
+                exit(2);
+            }
+            csimControlled43WarmupRounds = (uint32_t)value;
         }
     }
 
@@ -2875,6 +2990,12 @@ struct PairwiseModelInstaller : public Csim_Module {
                CsimPairwiseModel::receptionScale);
         printf("csim singleton-scout-aggressiveness %.6f\n",
                csimSingletonScoutAggressivenessMillionths / 1000000.0);
+        printf("csim proposal-delay-cap %u\n",
+               SingletonJoinPolicy::proposalDelayCap);
+        if (csimControlled43)
+            printf("csim controlled-43 warmup-rounds %u release-credibility %u\n",
+                   csimControlled43WarmupRounds,
+                   csimControlled43MinCredibility);
     }
 };
 static PairwiseModelInstaller pairwiseModelInstaller;
@@ -2925,6 +3046,29 @@ struct GlobalConvergenceReporter : public Csim_Module {
             csimGlobalConvergenceState.converged = false;
         }
 
+        if (csimControlled43 && !csimControlled43MigrationReleased) {
+            bool ready = true;
+            for (uint8_t i = 0; i < CONTEXT_COUNT; ++i) {
+                if (!rendezvousFleet.contexts[i]->csimHomeBeacon() ||
+                    rendezvousFleet.contexts[i]->csimWakeGeneration() <
+                        csimControlled43WarmupRounds) {
+                    ready = false;
+                    break;
+                }
+            }
+            if (ready) {
+                for (uint8_t i = 0; i < CONTEXT_COUNT; ++i)
+                    rendezvousFleet.contexts[i]->csimSeedHomeCredibility(
+                        csimControlled43MinCredibility);
+                csimControlled43MigrationReleased = true;
+                csimControlled43ReleaseUsec = now;
+                csimControlled43DelayExposures = 0;
+                printf("CSIM CONTROLLED RELEASE time=%.3f rounds=%u credibility=%u\n",
+                       now / 1000000.0, csimControlled43WarmupRounds,
+                       csimControlled43MinCredibility);
+            }
+        }
+
         uint64_t commonHome = 0;
         bool converged = true;
         for (uint8_t i = 0; i < CONTEXT_COUNT; ++i) {
@@ -2939,10 +3083,21 @@ struct GlobalConvergenceReporter : public Csim_Module {
         if (converged == csimGlobalConvergenceState.converged) return;
         csimGlobalConvergenceState.converged = converged;
         if (converged) {
+            if (csimControlled43 && csimControlled43MigrationReleased &&
+                csimControlled43DelayExposures == 0) {
+                printf("CSIM CONTROLLED INVALID no-cap-dependent-proposal time=%.3f\n",
+                       now / 1000000.0);
+                return;
+            }
             ++csimGlobalConvergenceState.count;
-            printf("CSIM GLOBAL CONVERGENCE count=%u time=%.3f beacon=%012llx\n",
+            printf("CSIM GLOBAL CONVERGENCE count=%u time=%.3f beacon=%012llx",
                    csimGlobalConvergenceState.count, now / 1000000.0,
                    (unsigned long long)commonHome);
+            if (csimControlled43MigrationReleased)
+                printf(" controlled-elapsed=%.3f delay-exposures=%u",
+                       (now - csimControlled43ReleaseUsec) / 1000000.0,
+                       csimControlled43DelayExposures);
+            printf("\n");
             if (exitOnConvergence) {
                 fflush(stdout);
                 Csim_exit();

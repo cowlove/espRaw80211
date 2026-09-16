@@ -45,6 +45,9 @@ int main() {
     assert(proposalDelay(4)==3);
     assert(proposalDelay(12)==5);
     assert(proposalDelay(100)==5);
+    assert(proposalDelayUncapped(0)==2);
+    assert(proposalDelayUncapped(4)==3);
+    assert(proposalDelayUncapped(12)==5);
     assert(reinforce(0,true)==1);
     assert(reinforce(12,true)==12);
     assert(reinforce(3,false)==3);
