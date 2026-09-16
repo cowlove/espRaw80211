@@ -204,7 +204,11 @@ def parse_evidence(data):
             else:
                 current.home_targets.add(found[3])
         if '@m ' in body:
-            values = dict(re.findall(r'([a-z]+)=([^ ]+)', body.split('@m ', 1)[1]))
+            # A logger reconnect/line-boundary artifact can concatenate the
+            # following compact record directly after @m.  Do not let fields
+            # from that next record overwrite the settling record.
+            settling_body = body.split('@m ', 1)[1].split('@r', 1)[0]
+            values = dict(re.findall(r'([a-z]+)=([^ ]+)', settling_body))
             if values.get('k') == 'b':
                 current.beacon_settling = values
             elif values.get('k') == 'e':
