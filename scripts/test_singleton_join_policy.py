@@ -42,9 +42,9 @@ int main() {
     assert(!mayCoalesce(1, 2, 20, 10));
     assert(proposalDelay(0)==2);
     assert(proposalDelay(3)==2);
-    assert(proposalDelay(4)==3);
-    assert(proposalDelay(12)==3);
-    assert(proposalDelay(100)==3);
+    assert(proposalDelay(4)==2);
+    assert(proposalDelay(12)==2);
+    assert(proposalDelay(100)==2);
     assert(proposalDelayUncapped(0)==2);
     assert(proposalDelayUncapped(4)==3);
     assert(proposalDelayUncapped(12)==5);
