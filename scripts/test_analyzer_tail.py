@@ -76,6 +76,46 @@ class AnalyzerTailTests(unittest.TestCase):
         self.assertEqual(rows[0]['bssid'], 'deadbeef')
         self.assertEqual(rows[0]['latency'], 93.0)
 
+    def test_merge_attribution_orders_observed_stages(self):
+        def line(stamp, board, body):
+            return (f'{stamp} host_mono_ns=1 board={board} port=p session=s | '
+                    f'{body}\n').encode()
+
+        marker_a = line('2026-09-09T08:00:00+00:00', 'a',
+                        'TEST EPOCH RESET reason=cold')
+        marker_b = line('2026-09-09T08:00:01+00:00', 'b',
+                        'TEST EPOCH RESET reason=cold')
+        log_a = (marker_a +
+                 line('2026-09-09T08:00:20+00:00', 'a',
+                      'visitor-positive-evidence target bbbb members 1 from aaaa full 1') +
+                 line('2026-09-09T08:00:30+00:00', 'a',
+                      'migration-proposal visitor target bbbb target-members 1') +
+                 line('2026-09-09T08:00:40+00:00', 'a',
+                      'migration-proposal committed target bbbb target-snapshot 1'))
+        log_b = marker_b
+        cycles_a = [
+            SimpleNamespace(wall=analyzer.evidence.timestamp(
+                '2026-09-09T08:00:10+00:00'), home='aaaa'),
+            SimpleNamespace(wall=analyzer.evidence.timestamp(
+                '2026-09-09T08:01:00+00:00'), home='bbbb')]
+        cycles_b = [
+            SimpleNamespace(wall=analyzer.evidence.timestamp(
+                '2026-09-09T08:00:11+00:00'), home='bbbb'),
+            SimpleNamespace(wall=analyzer.evidence.timestamp(
+                '2026-09-09T08:01:01+00:00'), home='bbbb')]
+        # epoch_recovery_events and complete_topology_snapshots each parse both
+        # boards, so provide the same four results twice.
+        parsed = [(cycles_a, 0), (cycles_b, 0), (cycles_a, 0), (cycles_b, 0)]
+        with patch.object(analyzer.evidence, 'parse_evidence', side_effect=parsed):
+            rows = analyzer.merge_attribution_events(
+                [('a', log_a), ('b', log_b)], required=2)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['large_size'], 1)
+        self.assertEqual(rows[0]['evidence_time'] - rows[0]['large_time'], 9.0)
+        self.assertEqual(rows[0]['proposal_time'] - rows[0]['large_time'], 19.0)
+        self.assertEqual(rows[0]['commit_time'] - rows[0]['large_time'], 29.0)
+        self.assertEqual(rows[0]['tail_seconds'], 49.0)
+
 
 if __name__ == '__main__':
     unittest.main()

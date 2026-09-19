@@ -434,6 +434,186 @@ def epoch_recovery_events(datasets, required: int, marker_skew: float = 15,
     return results
 
 
+def complete_topology_snapshots(datasets,
+                                max_skew: float = DEFAULT_OBSERVATION_SKEW_SECONDS):
+    """Return complete recent-home views after each board observation.
+
+    These are observer snapshots, not synchronized protocol state.  Requiring
+    one recent observation from every logged board and bounding host-time skew
+    makes the limitation explicit and keeps attribution consistent with the
+    existing 7/7 convergence oracle.
+    """
+    board_names = {name for name, _ in datasets}
+    observations = []
+    for name, data in datasets:
+        for cycle in evidence.parse_evidence(data)[0]:
+            if cycle.wall is not None and cycle.home:
+                observations.append((cycle.wall, name, cycle.home))
+    observations.sort()
+    latest = {}
+    snapshots = []
+    for wall, name, home in observations:
+        latest[name] = (wall, home)
+        if len(latest) != len(board_names):
+            continue
+        times = [value[0] for value in latest.values()]
+        if max(times) - min(times) > max_skew:
+            continue
+        counts = defaultdict(int)
+        for _, value in latest.values():
+            counts[value] += 1
+        snapshots.append({'host_time': wall, 'counts': dict(counts),
+                          'largest': max(counts.values())})
+    return snapshots
+
+
+def merge_decision_events(datasets):
+    """Return timestamped, decision-relevant migration log events."""
+    rows = []
+    for name, data in datasets:
+        for _, _, wall, body in evidence.records(data):
+            if wall is None:
+                continue
+            kind = None
+            detail = {}
+            visitor = re.search(
+                r'visitor-positive-evidence target ([0-9a-f]+) members (\d+)', body)
+            scout = re.search(
+                r'scout-positive-evidence target ([0-9a-f]+) packets (\d+)', body)
+            proposal = re.search(
+                r'migration-proposal (visitor|scout) target ([0-9a-f]+)', body)
+            rejected = re.search(r'migration-rejected .*? reason ([a-z-]+)', body)
+            if visitor:
+                kind = 'evidence'
+                detail = {'source': 'visitor', 'target': visitor.group(1),
+                          'members': int(visitor.group(2))}
+            elif scout and int(scout.group(2)) > 0:
+                kind = 'evidence'
+                detail = {'source': 'scout', 'target': scout.group(1),
+                          'packets': int(scout.group(2))}
+            elif proposal:
+                kind = 'proposal'
+                detail = {'source': proposal.group(1), 'target': proposal.group(2)}
+            elif 'migration-proposal committed ' in body:
+                kind = 'commit'
+                target = re.search(r'\btarget ([0-9a-f]+)', body)
+                detail = {'target': target.group(1) if target else None}
+            elif rejected:
+                kind = 'rejection'
+                detail = {'reason': rejected.group(1)}
+            if kind:
+                rows.append({'host_time': wall, 'board': name, 'kind': kind,
+                             **detail})
+    return sorted(rows, key=lambda row: row['host_time'])
+
+
+def merge_attribution_events(datasets, required: int):
+    """Attribute each clean epoch's first 4+ topology → 7/7 tail.
+
+    The report is deliberately observational.  It finds the first qualifying
+    event of each kind across the swarm; it does not claim that the first
+    evidence caused the first proposal or that the first commit caused the
+    eventual consensus.
+    """
+    threshold = min(4, required - 1)
+    topologies = complete_topology_snapshots(datasets)
+    decisions = merge_decision_events(datasets)
+    results = []
+    for epoch in epoch_recovery_events(datasets, required):
+        consensus = epoch['consensus_time']
+        if consensus is None:
+            continue
+        candidates = [row for row in topologies
+                      if epoch['epoch_time'] < row['host_time'] < consensus
+                      and threshold <= row['largest'] < required]
+        if not candidates:
+            continue
+        first_large = candidates[0]
+        events = [row for row in decisions
+                  if first_large['host_time'] <= row['host_time'] <= consensus]
+        first_evidence = next((row for row in events
+                               if row['kind'] == 'evidence'), None)
+        first_proposal = next((row for row in events
+                               if row['kind'] == 'proposal'), None)
+        first_commit = next((row for row in events
+                             if row['kind'] == 'commit' and first_proposal and
+                             row['host_time'] >= first_proposal['host_time']), None)
+        rejection_counts = defaultdict(int)
+        for row in events:
+            if row['kind'] == 'rejection':
+                rejection_counts[row['reason']] += 1
+        results.append({
+            'epoch_time': epoch['epoch_time'],
+            'large_time': first_large['host_time'],
+            'large_size': first_large['largest'],
+            'large_counts': first_large['counts'],
+            'evidence_time': first_evidence['host_time'] if first_evidence else None,
+            'proposal_time': first_proposal['host_time'] if first_proposal else None,
+            'commit_time': first_commit['host_time'] if first_commit else None,
+            'consensus_time': consensus,
+            'tail_seconds': consensus - first_large['host_time'],
+            'rejections': dict(rejection_counts),
+        })
+    return results
+
+
+def print_merge_attribution(datasets, required: int) -> None:
+    rows = merge_attribution_events(datasets, required)
+    print('Large-group merge attribution | first 4+ topology → 7/7 consensus')
+    if not rows:
+        print('  no complete attributed episodes in selected logs')
+        return
+
+    def elapsed(row, key, origin):
+        return None if row[key] is None else row[key] - row[origin]
+
+    def between(row, later, earlier):
+        if row[later] is None or row[earlier] is None:
+            return None
+        return row[later] - row[earlier]
+
+    def value(seconds):
+        return '-' if seconds is None else f'{seconds:.1f}s'
+
+    for row in rows:
+        start = datetime.fromtimestamp(row['large_time']).astimezone().isoformat(
+            timespec='seconds')
+        counts = '+'.join(map(str, sorted(row['large_counts'].values(), reverse=True)))
+        e = elapsed(row, 'evidence_time', 'large_time')
+        ep = between(row, 'proposal_time', 'evidence_time')
+        pc = between(row, 'commit_time', 'proposal_time')
+        cc = row['consensus_time'] - row['commit_time'] \
+            if row['commit_time'] is not None else None
+        rejects = ','.join(f'{key}:{count}' for key, count in
+                           sorted(row['rejections'].items())) or '-'
+        print(f"  start={start} topology={counts} 4+→evidence={value(e)} "
+              f"evidence→proposal={value(ep)} proposal→commit={value(pc)} "
+              f"commit→7/7={value(cc)} total={row['tail_seconds']:.1f}s "
+              f"rejects={rejects}")
+
+    def summary(label, values):
+        values = [item for item in values if item is not None]
+        if not values:
+            return f'{label}=n/a'
+        ordered = sorted(values)
+        p90 = ordered[max(0, int(.9 * len(ordered) + .999999) - 1)]
+        return (f'{label}=n{len(values)} median={statistics.median(values):.1f}s '
+                f'p90={p90:.1f}s')
+
+    print('  summary ' + ' | '.join((
+        summary('4+→evidence', [elapsed(row, 'evidence_time', 'large_time')
+                                for row in rows]),
+        summary('evidence→proposal', [between(row, 'proposal_time', 'evidence_time')
+                                      for row in rows]),
+        summary('proposal→commit', [between(row, 'commit_time', 'proposal_time')
+                                    for row in rows]),
+        summary('commit→7/7', [row['consensus_time'] - row['commit_time']
+                               if row['commit_time'] is not None else None
+                               for row in rows]),
+        summary('4+→7/7', [row['tail_seconds'] for row in rows]),
+    )))
+
+
 def foreign_evidence_times(datasets, mac: str = DEFAULT_FOREIGN_MAC) -> list[float]:
     """Return timestamps of received evidence naming the foreign radio MAC."""
     needle = mac.lower().replace(':', '')
@@ -977,6 +1157,8 @@ def main() -> int:
     ap.add_argument("--reset-recovery", action="store_true", help="measure reset-wave execution to next emerging same-home consensus")
     ap.add_argument("--epoch-recovery", action="store_true",
                     help="measure complete cold-reset epoch waves to emerging consensus")
+    ap.add_argument('--merge-attribution', action='store_true',
+                    help='attribute first 4+ topology to evidence, proposal, commit and 7/7')
     ap.add_argument('--foreign-convergence', action='store_true',
                     help='label cold-epoch convergence intervals F+/F-/inconclusive from foreign-MAC evidence')
     ap.add_argument('--foreign-freshness-seconds', type=float,
@@ -1102,7 +1284,8 @@ def main() -> int:
             for note in caveats:
                 print('Note: ' + note)
         return 0
-    if args.convergence or args.reset_recovery or args.epoch_recovery or args.foreign_convergence:
+    if (args.convergence or args.reset_recovery or args.epoch_recovery or
+            args.foreign_convergence or args.merge_attribution):
         print_current_home_distribution(datasets)
         if args.reset_recovery:
             print_reset_recovery(datasets, swarm_board_count())
@@ -1112,6 +1295,8 @@ def main() -> int:
             print_foreign_convergence(
                 datasets, swarm_board_count(), args.foreign_freshness_seconds,
                 args.foreign_plus_coverage)
+        if args.merge_attribution:
+            print_merge_attribution(datasets, swarm_board_count())
         if not args.convergence:
             return 0
         print("Convergence dashboard | KPI = complete wake/sleep cycles after flush until 10/10 consensus")

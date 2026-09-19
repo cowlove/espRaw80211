@@ -278,11 +278,25 @@ taken, while `scripts/decision_snapshots.py` independently verifies schema
 version, row count, association fingerprint, and action equality.  The compact
 versus legacy compatibility test validates both forms on every run.
 
-### Slice C: historical tail attribution
+### Slice C: historical tail attribution (first report complete)
 
 Use existing logs to classify 4+→7/7 wall time under the deployed policy.  This
 can proceed independently of new firmware, but must label unavailable evidence
 as unknown rather than infer a complete association table.
+
+The first analyzer view is available as:
+
+```sh
+./scripts/analyze_rendezvous.py --merge-attribution --session all --tail-bytes 5m
+```
+
+For each complete cold-reset epoch it reports the ordered observer-visible
+chain from the first complete 4+ (but not 7/7) topology through first received
+cross-group evidence, first new proposal, first later commit, and 7/7
+consensus.  It also counts migration rejections by reason.  Missing stages
+remain explicit.  Because these are first events across independent boards,
+the report does not claim that they form one causal proposal chain, and a
+proposal that began before the observer's first 4+ snapshot is not invented.
 
 ### Slice D: passive hardware snapshots (deployed)
 
