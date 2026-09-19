@@ -11,6 +11,7 @@ import json
 import shlex
 import time
 import statistics
+import bisect
 from collections import defaultdict
 from itertools import combinations
 from datetime import datetime
@@ -30,6 +31,15 @@ SCOUT_LINK_MIN_WIRE_VERSION = 7
 # independent of supervisor process state: it reconstructs presence from the
 # append-only device logs.
 DEFAULT_FOREIGN_MAC = 'e072a1a23784'
+
+DECISION_SNAPSHOT = re.compile(
+    r'@v v=(?P<v>\d+) e=(?P<e>[0-9a-f]+) w=(?P<w>\d+) '
+    r'x=(?P<x>\d+) i=(?P<i>\d+) o=(?P<o>\d+) k=(?P<k>\d+) '
+    r'src=(?P<src>\S+) h=(?P<h>[0-9a-f]+) hm=(?P<hm>\d+) '
+    r't=(?P<t>[0-9a-f]+) tm=(?P<tm>\d+) pb=(?P<pb>[0-9a-f]+) '
+    r'ph=(?P<ph>[0-9a-f]+) pm=(?P<pm>\d+) pa=(?P<pa>\d+) '
+    r'tv=(?P<tv>\d+) n=(?P<n>\d+) q=(?P<q>[0-9a-f]+) '
+    r'actual=(?P<actual>\S+) replay=(?P<replay>\S+)')
 
 
 def parse_tail_bytes(value: str) -> int:
@@ -614,6 +624,169 @@ def print_merge_attribution(datasets, required: int) -> None:
     )))
 
 
+def _preferred(members: int, bssid: str, other_members: int,
+               other_bssid: str) -> bool:
+    """Mirror the production larger-group/lower-BSSID ordering."""
+    return members > other_members or (
+        members == other_members and int(bssid, 16) < int(other_bssid, 16))
+
+
+def decision_snapshot_reason(fields: dict[str, str]) -> str:
+    """Give a policy-level reason for one recorded snapshot action."""
+    action = fields['actual']
+    home_members, target_members = int(fields['hm']), int(fields['tm'])
+    if action in ('reject-not-preferred', 'cancel-not-preferred'):
+        if target_members < home_members:
+            return 'target-smaller'
+        if target_members == home_members and int(fields['t'], 16) > int(
+                fields['h'], 16):
+            return 'equal-higher-bssid'
+        return 'not-preferred-other'
+    return {
+        'reject-weaker': 'weaker-than-pending',
+        'cancel-home-changed': 'home-changed',
+        'cancel-home-caught-up': 'home-caught-up',
+        'await-activation': 'credibility-wait',
+        'propose': 'preferred-target',
+        'refresh': 'pending-target-refresh',
+        'commit': 'proposal-commit',
+        'join': 'singleton-join',
+        'coalesce': 'singleton-coalesce',
+    }.get(action, action)
+
+
+def decision_snapshot_events(datasets, topologies=None):
+    """Return timestamped decision snapshots with observer-view comparisons.
+
+    The nearest complete topology is an asynchronous observer view, not hidden
+    protocol truth.  A disagreement is therefore evidence of a locally
+    incomplete/different membership view, never proof that the device erred.
+    """
+    topologies = (complete_topology_snapshots(datasets)
+                  if topologies is None else topologies)
+    topology_times = [row['host_time'] for row in topologies]
+    rows = []
+    for board, data in datasets:
+        for _, _, wall, body in evidence.records(data):
+            match = DECISION_SNAPSHOT.search(body)
+            if wall is None or not match:
+                continue
+            fields = match.groupdict()
+            if fields['actual'] != fields['replay']:
+                # Retain the record, but never use a mismatched replay as
+                # counterfactual evidence.
+                replay_valid = False
+            else:
+                replay_valid = True
+            row = {
+                'host_time': wall, 'board': board, 'fields': fields,
+                'action': fields['actual'], 'source': fields['src'],
+                'reason': decision_snapshot_reason(fields),
+                'home': fields['h'], 'target': fields['t'],
+                'home_members': int(fields['hm']),
+                'target_members': int(fields['tm']),
+                'replay_valid': replay_valid,
+                'observer_disagrees': False,
+                'observer_home_members': None,
+                'observer_target_members': None,
+            }
+            index = bisect.bisect_right(topology_times, wall) - 1
+            if index >= 0 and wall - topology_times[index] <= \
+                    DEFAULT_OBSERVATION_SKEW_SECONDS:
+                counts = {f'{int(key, 16):x}': value for key, value in
+                          topologies[index]['counts'].items()}
+                home = counts.get(f'{int(fields["h"], 16):x}')
+                target = counts.get(f'{int(fields["t"], 16):x}')
+                row['observer_home_members'] = home
+                row['observer_target_members'] = target
+                if home is not None and target is not None:
+                    local_prefers = _preferred(
+                        row['target_members'], row['target'],
+                        row['home_members'], row['home'])
+                    observer_prefers = _preferred(
+                        target, row['target'], home, row['home'])
+                    row['observer_disagrees'] = local_prefers != observer_prefers
+            rows.append(row)
+    return sorted(rows, key=lambda row: row['host_time'])
+
+
+def merge_decision_attribution_events(datasets, required: int):
+    """Classify snapshot decisions inside each observed 4+→7/7 tail."""
+    topologies = complete_topology_snapshots(datasets)
+    snapshots = decision_snapshot_events(datasets, topologies)
+    threshold = min(4, required - 1)
+    results = []
+    for epoch in epoch_recovery_events(datasets, required):
+        consensus = epoch['consensus_time']
+        if consensus is None:
+            continue
+        large = next((row for row in topologies
+                      if epoch['epoch_time'] < row['host_time'] < consensus
+                      and threshold <= row['largest'] < required), None)
+        if large is None:
+            continue
+        decisions = [row for row in snapshots
+                     if large['host_time'] <= row['host_time'] <= consensus]
+        reasons, actions, sources = defaultdict(int), defaultdict(int), defaultdict(int)
+        for decision in decisions:
+            reasons[decision['reason']] += 1
+            actions[decision['action']] += 1
+            sources[decision['source']] += 1
+        preferred = next((row for row in decisions if row['action'] in
+                          ('propose', 'refresh', 'join', 'coalesce')), None)
+        results.append({
+            'large_time': large['host_time'],
+            'large_counts': large['counts'],
+            'consensus_time': consensus,
+            'tail_seconds': consensus - large['host_time'],
+            'decision_count': len(decisions),
+            'preferred_time': preferred['host_time'] if preferred else None,
+            'reasons': dict(reasons), 'actions': dict(actions),
+            'sources': dict(sources),
+            'observer_disagreements': sum(
+                row['observer_disagrees'] for row in decisions),
+            'replay_mismatches': sum(not row['replay_valid'] for row in decisions),
+        })
+    return results
+
+
+def print_merge_decision_attribution(datasets, required: int) -> None:
+    rows = merge_decision_attribution_events(datasets, required)
+    print('Large-group decision attribution | local snapshots in 4+→7/7 tails')
+    if not rows:
+        print('  no snapshot-bearing attributed episodes in selected logs')
+        return
+    totals = {key: defaultdict(int) for key in ('reasons', 'actions', 'sources')}
+    waits = []
+    disagreements = mismatches = decisions = 0
+    for row in rows:
+        for key in totals:
+            for name, count in row[key].items():
+                totals[key][name] += count
+        decisions += row['decision_count']
+        disagreements += row['observer_disagreements']
+        mismatches += row['replay_mismatches']
+        if row['preferred_time'] is not None:
+            waits.append(row['preferred_time'] - row['large_time'])
+    def counts(values):
+        return ','.join(f'{key}:{value}' for key, value in
+                        sorted(values.items(), key=lambda item: (-item[1], item[0]))) or '-'
+    print(f'  episodes={len(rows)} decisions={decisions} '
+          f'observer-disagreements={disagreements} replay-mismatches={mismatches}')
+    print(f'  actions={counts(totals["actions"])}')
+    print(f'  reasons={counts(totals["reasons"])}')
+    print(f'  sources={counts(totals["sources"])}')
+    if waits:
+        ordered = sorted(waits)
+        p90 = ordered[max(0, int(.9 * len(ordered) + .999999) - 1)]
+        print(f'  4+→first-preferred n={len(waits)} '
+              f'median={statistics.median(waits):.1f}s p90={p90:.1f}s')
+    else:
+        print('  4+→first-preferred n=0')
+    print('  Note: observer-disagreements compare asynchronous complete-log topology '
+          'with one board\'s local snapshot; they indicate view skew, not firmware error.')
+
+
 def foreign_evidence_times(datasets, mac: str = DEFAULT_FOREIGN_MAC) -> list[float]:
     """Return timestamps of received evidence naming the foreign radio MAC."""
     needle = mac.lower().replace(':', '')
@@ -1159,6 +1332,8 @@ def main() -> int:
                     help="measure complete cold-reset epoch waves to emerging consensus")
     ap.add_argument('--merge-attribution', action='store_true',
                     help='attribute first 4+ topology to evidence, proposal, commit and 7/7')
+    ap.add_argument('--merge-decisions', action='store_true',
+                    help='classify decision snapshots inside observed 4+ to 7/7 tails')
     ap.add_argument('--foreign-convergence', action='store_true',
                     help='label cold-epoch convergence intervals F+/F-/inconclusive from foreign-MAC evidence')
     ap.add_argument('--foreign-freshness-seconds', type=float,
@@ -1285,7 +1460,8 @@ def main() -> int:
                 print('Note: ' + note)
         return 0
     if (args.convergence or args.reset_recovery or args.epoch_recovery or
-            args.foreign_convergence or args.merge_attribution):
+            args.foreign_convergence or args.merge_attribution or
+            args.merge_decisions):
         print_current_home_distribution(datasets)
         if args.reset_recovery:
             print_reset_recovery(datasets, swarm_board_count())
@@ -1297,6 +1473,8 @@ def main() -> int:
                 args.foreign_plus_coverage)
         if args.merge_attribution:
             print_merge_attribution(datasets, swarm_board_count())
+        if args.merge_decisions:
+            print_merge_decision_attribution(datasets, swarm_board_count())
         if not args.convergence:
             return 0
         print("Convergence dashboard | KPI = complete wake/sleep cycles after flush until 10/10 consensus")

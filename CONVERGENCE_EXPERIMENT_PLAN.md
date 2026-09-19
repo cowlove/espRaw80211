@@ -298,6 +298,31 @@ remain explicit.  Because these are first events across independent boards,
 the report does not claim that they form one causal proposal chain, and a
 proposal that began before the observer's first 4+ snapshot is not invented.
 
+The second analyzer view uses the deployed appointment snapshots:
+
+```sh
+./scripts/analyze_rendezvous.py --merge-decisions --session all --tail-bytes 5m
+```
+
+It classifies every local decision inside an observed 4+→7/7 tail as target
+smaller, equal-size/higher-BSSID, weaker than an existing pending target,
+credibility wait, proposal, refresh, commit, or cancellation.  It also compares
+the device's local membership counts with the nearest complete observer
+topology.  Such an observer disagreement is evidence of an asynchronous or
+incomplete local view, not proof that the firmware made an incorrect decision.
+Replay mismatches are counted explicitly and exclude a record from
+counterfactual use.
+
+In an initial recent 23-episode sample, 451 snapshot decisions contained 223
+not-preferred rejections (206 target-smaller and 18 equal-size/higher-BSSID),
+60 credibility waits, 59 proposal starts, and 39 commits.  Visitor evidence
+accounted for 283 decisions versus 61 direct-scout decisions.  Forty-one local
+preference results disagreed with the nearest complete observer topology.  The
+first locally preferred target appeared a median 46 seconds after the first
+observer-visible 4+ topology (p90 166 seconds).  This points toward local
+membership-view quality and visitor-driven opportunity as higher-value next
+targets than further reducing proposal activation delay.
+
 ### Slice D: passive hardware snapshots (deployed)
 
 Wire the proven capture path into firmware using a fixed-size RAM buffer and

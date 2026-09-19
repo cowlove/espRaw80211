@@ -116,6 +116,40 @@ class AnalyzerTailTests(unittest.TestCase):
         self.assertEqual(rows[0]['commit_time'] - rows[0]['large_time'], 29.0)
         self.assertEqual(rows[0]['tail_seconds'], 49.0)
 
+    def test_snapshot_rejection_reason_and_observer_disagreement(self):
+        fields = {
+            'actual': 'reject-not-preferred', 'hm': '4', 'tm': '3',
+            'h': '66a4b792e676', 't': '60a4b792da8a',
+        }
+        self.assertEqual(analyzer.decision_snapshot_reason(fields),
+                         'target-smaller')
+
+        body = ('@v v=1 e=1234 w=2 x=3 i=0 o=0 k=1 src=visitor '
+                'h=66a4b792e676 hm=4 t=60a4b792da8a tm=3 '
+                'pb=0 ph=0 pm=0 pa=0 tv=0 n=0 q=0 '
+                'actual=reject-not-preferred replay=reject-not-preferred')
+        line = (f'2026-09-09T08:00:20+00:00 host_mono_ns=1 board=a '
+                f'port=p session=s | {body}\n').encode()
+        topology = [{
+            'host_time': analyzer.evidence.timestamp('2026-09-09T08:00:19+00:00'),
+            'counts': {'66a4b792e676': 3, '60a4b792da8a': 4},
+            'largest': 4,
+        }]
+        rows = analyzer.decision_snapshot_events([('a', line)], topology)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['reason'], 'target-smaller')
+        self.assertTrue(rows[0]['observer_disagrees'])
+        self.assertEqual(rows[0]['observer_home_members'], 3)
+        self.assertEqual(rows[0]['observer_target_members'], 4)
+
+    def test_equal_size_higher_bssid_reason(self):
+        fields = {
+            'actual': 'reject-not-preferred', 'hm': '4', 'tm': '4',
+            'h': '60a4b792da8a', 't': '66a4b792e676',
+        }
+        self.assertEqual(analyzer.decision_snapshot_reason(fields),
+                         'equal-higher-bssid')
+
 
 if __name__ == '__main__':
     unittest.main()
