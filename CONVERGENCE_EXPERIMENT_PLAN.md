@@ -10,6 +10,64 @@ without changing live rendezvous behavior prematurely.
 Reliability remains the acceptance criterion.  Reduced awake time is a later,
 separate optimization.
 
+## Proposal-delay cap campaign
+
+The current hardware experiment compares the production proposal-delay cap
+against the previous settings:
+
+- **Cap 5:** original production behavior;
+- **Cap 3:** deployed as `ebcd8be`;
+- **Cap 2:** deployed as `7562a9c`.
+
+The cap controls the maximum credibility-based proposal activation delay.  It
+does not change singleton coalescence, beacon scanning, exchange duration, or
+the distributed 10/10 reset mechanism.
+
+### Why we tested it
+
+CSIM's ordinary clean-start workload showed little difference between caps,
+because most runs do not reach a mature proposal on the critical path.  A
+deliberately mature 4/3 fixture did exercise the cap and showed a strong
+effect:
+
+| cap | median release-to-7/7 | p95 | success |
+|---:|---:|---:|---:|
+| 5 | 729.7s | 962.4s | 100/100 |
+| 3 | 489.6s | 714.7s | 100/100 |
+| 2 | 369.6s | 609.6s | 100/100 |
+
+The fixture is useful evidence that credibility delay can dominate a mature
+large-group merge, but it is intentionally controlled and cannot predict the
+full hardware trajectory by itself.
+
+### Hardware evidence so far
+
+The cap-3 hardware phase produced approximately **124 clean epochs** (three
+invalid reset attempts excluded), with median convergence around **893s**.
+The cap-2 phase subsequently reached approximately **103 clean epochs** (one
+invalid reset attempt excluded), with median around **935s**.  These samples
+have similar broad, skewed distributions and do not show a statistically
+credible cap-2 improvement; the roughly 42-second median difference is well
+within uncertainty and environmental variation.
+
+The current interpretation is deliberately conservative:
+
+- cap 3 operated reliably but did not produce a clear hardware speedup;
+- cap 2 is also operating reliably, but has not yet demonstrated a speedup;
+- the hardware comparison is observational rather than randomized, with
+  time-of-day, RF activity, foreign-board presence, and reset epochs as
+  possible confounders;
+- invalid coordinated resets remain visible in the logs but are excluded from
+  primary convergence statistics;
+- the large 4/3-or-larger merge tail remains the dominant source of variance.
+
+The cap campaign should therefore be treated as a reliability/performance
+experiment, not as evidence that a CSIM improvement transfers automatically
+to hardware.  Keep the prior cap commits available for rollback, and compare
+the phases using the same `since-reset` metric with F+/F− and time-of-day
+stratification when possible.  Do not change another protocol parameter until
+the current cap-2 sample is complete enough for a stable comparison.
+
 ## What the current farm data says
 
 With the 120-second rendezvous cadence, the observed clean epochs show:
