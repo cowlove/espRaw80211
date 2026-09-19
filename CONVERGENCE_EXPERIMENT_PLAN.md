@@ -323,6 +323,27 @@ observer-visible 4+ topology (p90 166 seconds).  This points toward local
 membership-view quality and visitor-driven opportunity as higher-value next
 targets than further reducing proposal activation delay.
 
+A one-step membership-freshness counterfactual is available as:
+
+```sh
+./scripts/analyze_rendezvous.py --membership-counterfactual \
+  --membership-ttls 8,10,12 --session all --tail-bytes 5m
+```
+
+It reconstructs the deployed six-wake home and target counts from every full
+snapshot row set before considering that record.  It then asks whether longer
+association freshness would change the local group-ordering result.  This is
+only first-decision screening; changed future observations still require CSIM.
+
+In the initial 344-snapshot hardware sample, all deployed six-wake counts
+reconstructed exactly.  Freshness limits of 8, 10, and 12 wakes rescued zero
+rejected targets.  Instead they produced 2, 3, and 4 preferred→rejected
+reversals respectively, each moving away from the nearest complete observer
+topology.  Therefore simply retaining association rows longer is not a useful
+solution to the large-group merge tail.  The next experiment should improve
+established-group scout opportunity/target selection rather than increase
+membership TTL.
+
 ### Slice D: passive hardware snapshots (deployed)
 
 Wire the proven capture path into firmware using a fixed-size RAM buffer and

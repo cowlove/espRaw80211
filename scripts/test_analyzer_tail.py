@@ -150,6 +150,56 @@ class AnalyzerTailTests(unittest.TestCase):
         self.assertEqual(analyzer.decision_snapshot_reason(fields),
                          'equal-higher-bssid')
 
+    def test_membership_ttl_counterfactual_flips_stale_target(self):
+        stamp = analyzer.evidence.timestamp('2026-09-09T08:00:20+00:00')
+        large = {'host_time': stamp - 10, 'counts': {'aaaa': 4, 'bbbb': 3},
+                 'largest': 4}
+        decision = {
+            'host_time': stamp, 'fields': {'k': '1'},
+            'home': 'aaaa', 'target': 'bbbb',
+            'home_members': 3, 'target_members': 2,
+            'observer_home_members': 3, 'observer_target_members': 4,
+            'association_rows': [
+                {'m': f'{i:x}', 'b': 'aaaa', 'a': '0'} for i in range(1, 4)
+            ] + [
+                {'m': '10', 'b': 'bbbb', 'a': '0'},
+                {'m': '11', 'b': 'bbbb', 'a': '0'},
+                {'m': '12', 'b': 'bbbb', 'a': '7'},
+                {'m': '13', 'b': 'bbbb', 'a': '8'},
+            ],
+        }
+        epoch = {'epoch_time': stamp - 20, 'consensus_time': stamp + 20}
+        with patch.object(analyzer, 'complete_topology_snapshots',
+                          return_value=[large]), \
+             patch.object(analyzer, 'decision_snapshot_events',
+                          return_value=[decision]), \
+             patch.object(analyzer, 'epoch_recovery_events',
+                          return_value=[epoch]):
+            report = analyzer.membership_ttl_counterfactual([], 7, (8,))
+        self.assertEqual(report['reconstructed'], 1)
+        self.assertEqual(report['ttls'][8]['rejected_to_preferred'], 1)
+        self.assertEqual(report['ttls'][8]['observer_alignment_improved'], 1)
+        self.assertEqual(report['ttls'][8]['preferred_to_rejected'], 0)
+
+    def test_membership_counterfactual_excludes_baseline_mismatch(self):
+        stamp = analyzer.evidence.timestamp('2026-09-09T08:00:20+00:00')
+        decision = {
+            'host_time': stamp, 'fields': {'k': '1'},
+            'home': 'aaaa', 'target': 'bbbb',
+            'home_members': 2, 'target_members': 1,
+            'observer_home_members': None, 'observer_target_members': None,
+            'association_rows': [],
+        }
+        with patch.object(analyzer, 'complete_topology_snapshots',
+                          return_value=[{'host_time': stamp - 1, 'largest': 4}]), \
+             patch.object(analyzer, 'decision_snapshot_events',
+                          return_value=[decision]), \
+             patch.object(analyzer, 'epoch_recovery_events', return_value=[{
+                 'epoch_time': stamp - 2, 'consensus_time': stamp + 2}]):
+            report = analyzer.membership_ttl_counterfactual([], 7, (8,))
+        self.assertEqual(report['reconstructed'], 0)
+        self.assertEqual(report['missing_or_mismatch'], 1)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -18,6 +18,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 import rendezvous_evidence as evidence
+import decision_snapshots as snapshot_trace
 from test_swarm_config import swarm_board_count
 
 STAMP = re.compile(r"^(\d+\.\d+)")
@@ -55,6 +56,16 @@ def parse_tail_bytes(value: str) -> int:
             raise argparse.ArgumentTypeError('--tail-bytes does not allow a negative m suffix')
         result *= 1_000_000
     return result
+
+
+def parse_cycle_list(value: str) -> tuple[int, ...]:
+    try:
+        values = tuple(int(item) for item in value.split(','))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('cycle list must contain integers') from exc
+    if not values or any(item < 6 for item in values):
+        raise argparse.ArgumentTypeError('cycle values must be at least 6')
+    return values
 
 
 @dataclass
@@ -667,6 +678,12 @@ def decision_snapshot_events(datasets, topologies=None):
     topology_times = [row['host_time'] for row in topologies]
     rows = []
     for board, data in datasets:
+        tables = defaultdict(list)
+        for _, _, _, body in evidence.records(data):
+            row_match = snapshot_trace.ROW.search(body)
+            if row_match:
+                values = row_match.groupdict()
+                tables[(values['e'], values['x'], values['t'])].append(values)
         for _, _, wall, body in evidence.records(data):
             match = DECISION_SNAPSHOT.search(body)
             if wall is None or not match:
@@ -689,6 +706,8 @@ def decision_snapshot_events(datasets, topologies=None):
                 'observer_disagrees': False,
                 'observer_home_members': None,
                 'observer_target_members': None,
+                'association_rows': tables.get(
+                    (fields['e'], fields['x'], fields['tv']), []),
             }
             index = bisect.bisect_right(topology_times, wall) - 1
             if index >= 0 and wall - topology_times[index] <= \
@@ -708,6 +727,101 @@ def decision_snapshot_events(datasets, topologies=None):
                     row['observer_disagrees'] = local_prefers != observer_prefers
             rows.append(row)
     return sorted(rows, key=lambda row: row['host_time'])
+
+
+def membership_count(rows, bssid: str, freshness_cycles: int) -> int:
+    """Count unique fresh association origins selecting one BSSID."""
+    selected = int(bssid, 16)
+    return len({int(row['m'], 16) for row in rows
+                if int(row['b'], 16) == selected and
+                int(row['a']) <= freshness_cycles})
+
+
+def membership_ttl_counterfactual(datasets, required: int, ttls=(8, 10, 12)):
+    """One-step replay of alternative association freshness limits.
+
+    Only ObserveCandidate snapshots inside an observed 4+→7/7 tail are used.
+    A record is counterfactually eligible only when its rows reconstruct the
+    deployed six-cycle home and target counts exactly.
+    """
+    topologies = complete_topology_snapshots(datasets)
+    snapshots = decision_snapshot_events(datasets, topologies)
+    threshold = min(4, required - 1)
+    selected = []
+    for epoch in epoch_recovery_events(datasets, required):
+        consensus = epoch['consensus_time']
+        if consensus is None:
+            continue
+        large = next((row for row in topologies
+                      if epoch['epoch_time'] < row['host_time'] < consensus and
+                      threshold <= row['largest'] < required), None)
+        if large is None:
+            continue
+        selected.extend(row for row in snapshots
+                        if large['host_time'] <= row['host_time'] <= consensus and
+                        row['fields']['k'] == '1')
+    results = {ttl: {
+        'eligible': 0, 'rejected_to_preferred': 0,
+        'preferred_to_rejected': 0, 'observer_alignment_improved': 0,
+        'observer_alignment_worsened': 0,
+    } for ttl in ttls}
+    reconstructed = 0
+    missing_or_mismatch = 0
+    for row in selected:
+        associations = row['association_rows']
+        baseline_home = membership_count(associations, row['home'], 6)
+        baseline_target = membership_count(associations, row['target'], 6)
+        if (baseline_home != row['home_members'] or
+                baseline_target != row['target_members']):
+            missing_or_mismatch += 1
+            continue
+        reconstructed += 1
+        baseline_prefers = _preferred(
+            baseline_target, row['target'], baseline_home, row['home'])
+        observer_prefers = None
+        if (row['observer_home_members'] is not None and
+                row['observer_target_members'] is not None):
+            observer_prefers = _preferred(
+                row['observer_target_members'], row['target'],
+                row['observer_home_members'], row['home'])
+        for ttl in ttls:
+            target = membership_count(associations, row['target'], ttl)
+            home = membership_count(associations, row['home'], ttl)
+            alternate_prefers = _preferred(
+                target, row['target'], home, row['home'])
+            result = results[ttl]
+            result['eligible'] += 1
+            if not baseline_prefers and alternate_prefers:
+                result['rejected_to_preferred'] += 1
+            elif baseline_prefers and not alternate_prefers:
+                result['preferred_to_rejected'] += 1
+            if observer_prefers is not None:
+                before = baseline_prefers == observer_prefers
+                after = alternate_prefers == observer_prefers
+                if not before and after:
+                    result['observer_alignment_improved'] += 1
+                elif before and not after:
+                    result['observer_alignment_worsened'] += 1
+    return {
+        'snapshots': len(selected), 'reconstructed': reconstructed,
+        'missing_or_mismatch': missing_or_mismatch, 'ttls': results,
+    }
+
+
+def print_membership_ttl_counterfactual(datasets, required: int, ttls) -> None:
+    report = membership_ttl_counterfactual(datasets, required, ttls)
+    print('Membership freshness counterfactual | one-step 4+→7/7 snapshots')
+    print(f"  candidate-snapshots={report['snapshots']} "
+          f"exact-six-cycle-reconstructions={report['reconstructed']} "
+          f"excluded={report['missing_or_mismatch']}")
+    for ttl, row in report['ttls'].items():
+        print(f"  ttl={ttl} wakes eligible={row['eligible']} "
+              f"reject→preferred={row['rejected_to_preferred']} "
+              f"preferred→reject={row['preferred_to_rejected']} "
+              f"observer-align+={row['observer_alignment_improved']} "
+              f"observer-align-={row['observer_alignment_worsened']}")
+    print('  Note: this is first-decision screening on unchanged observations; '
+          'CSIM is required after the first divergent action.')
 
 
 def merge_decision_attribution_events(datasets, required: int):
@@ -1334,6 +1448,10 @@ def main() -> int:
                     help='attribute first 4+ topology to evidence, proposal, commit and 7/7')
     ap.add_argument('--merge-decisions', action='store_true',
                     help='classify decision snapshots inside observed 4+ to 7/7 tails')
+    ap.add_argument('--membership-counterfactual', action='store_true',
+                    help='replay decision snapshots with longer association freshness')
+    ap.add_argument('--membership-ttls', type=parse_cycle_list, default=(8, 10, 12),
+                    help='comma-separated association freshness cycles (default: 8,10,12)')
     ap.add_argument('--foreign-convergence', action='store_true',
                     help='label cold-epoch convergence intervals F+/F-/inconclusive from foreign-MAC evidence')
     ap.add_argument('--foreign-freshness-seconds', type=float,
@@ -1461,7 +1579,7 @@ def main() -> int:
         return 0
     if (args.convergence or args.reset_recovery or args.epoch_recovery or
             args.foreign_convergence or args.merge_attribution or
-            args.merge_decisions):
+            args.merge_decisions or args.membership_counterfactual):
         print_current_home_distribution(datasets)
         if args.reset_recovery:
             print_reset_recovery(datasets, swarm_board_count())
@@ -1475,6 +1593,9 @@ def main() -> int:
             print_merge_attribution(datasets, swarm_board_count())
         if args.merge_decisions:
             print_merge_decision_attribution(datasets, swarm_board_count())
+        if args.membership_counterfactual:
+            print_membership_ttl_counterfactual(
+                datasets, swarm_board_count(), args.membership_ttls)
         if not args.convergence:
             return 0
         print("Convergence dashboard | KPI = complete wake/sleep cycles after flush until 10/10 consensus")
