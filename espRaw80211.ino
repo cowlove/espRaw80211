@@ -141,7 +141,9 @@ static_assert(CONTEXT_COUNT == CsimPairwiseData::boardCount,
 static uint64_t csimMaximumAwakeUsec = 0;
 static uint32_t csimSingletonScoutAggressivenessMillionths = 1000000;
 static uint32_t csimEstablishedScoutIntervalWakes = 2;
-static bool csimEstablishedScoutLargestKnown = false;
+// Match production by default. --established-scout-fair preserves the old
+// selector for paired baseline experiments.
+static bool csimEstablishedScoutLargestKnown = true;
 // Application-owned RF world. Each destination selects one environment, so
 // simulated devices can observe different BSSIDs and beacon clocks while the
 // capture HAL remains unaware of the RF model.
@@ -2030,6 +2032,17 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 #endif
     }
 
+    bool establishedScoutLargestKnown() const {
+#ifdef CSIM
+        return csimEstablishedScoutLargestKnown;
+#else
+        // Production policy: spend the existing one-scout budget on the
+        // largest locally reconstructed rival group. Cadence remains the
+        // conservative every-two-logical-wakes setting above.
+        return true;
+#endif
+    }
+
     void dumpBeaconScanSummary() const {
         const uint64_t now = steadyMicros();
         for (const BeaconInfo &info : packetLog) {
@@ -2141,8 +2154,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                             selectedTargeted ? 1U : 0U,
                             (unsigned)targetedScoutExtraTickets);
                 } else if (!eligible) {
-#ifdef CSIM
-                    if (csimEstablishedScoutLargestKnown) {
+                    if (establishedScoutLargestKnown()) {
                         size_t memberCounts[packetLogSize] = {};
                         for (size_t i = 0; i < count; ++i)
                             memberCounts[i] = listenerCount(candidates[i]);
@@ -2152,7 +2164,6 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                             (unsigned long long)selected,
                             (unsigned)listenerCount(selected));
                     } else
-#endif
                     selected = RendezvousPlanner::chooseScout(candidates, count,
                         home, spiffsScoutCursor.read());
                 }
@@ -2994,6 +3005,8 @@ struct PairwiseModelInstaller : public Csim_Module {
             csimEstablishedScoutIntervalWakes = (uint32_t)value;
         } else if (strcmp(*arg, "--established-scout-largest-known") == 0) {
             csimEstablishedScoutLargestKnown = true;
+        } else if (strcmp(*arg, "--established-scout-fair") == 0) {
+            csimEstablishedScoutLargestKnown = false;
         } else if (strcmp(*arg, "--controlled-43") == 0) {
             csimControlled43 = true;
         } else if (strcmp(*arg, "--controlled-43-credibility") == 0) {

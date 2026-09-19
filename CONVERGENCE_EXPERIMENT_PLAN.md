@@ -378,6 +378,12 @@ reduced total planned awake time slightly to 896s.  Therefore the isolated
 largest-known selector is the strongest next hardware candidate; cadence
 acceleration should remain a separate later experiment.
 
+Largest-known selection was subsequently promoted to the production default,
+while the established-group cadence remains one scout every two logical wakes.
+CSIM now matches that production default.  Use `--established-scout-fair` to
+reproduce the previous fair-rotation baseline; do not combine largest-known
+selection with every-wake scouting unless the seed-30 stall is understood.
+
 ### Slice D: passive hardware snapshots (deployed)
 
 Wire the proven capture path into firmware using a fixed-size RAM buffer and
