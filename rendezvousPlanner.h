@@ -167,6 +167,28 @@ inline uint64_t chooseScout(const uint64_t *eligible, size_t count,
     return next ? next : smallest;
 }
 
+// Greedy established-group experiment: visit the rival supported by the
+// largest locally reconstructed membership. Equal-sized rivals use the same
+// deterministic lower-BSSID ordering as migration policy. Membership counts
+// are parallel to eligible[]; callers still freshness/RSSI filter the list.
+inline uint64_t chooseLargestKnownScout(const uint64_t *eligible,
+                                        const size_t *members, size_t count,
+                                        uint64_t home) {
+    uint64_t selected = 0;
+    size_t selectedMembers = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const uint64_t candidate = eligible[i];
+        if (!candidate || candidate == home) continue;
+        const size_t candidateMembers = members ? members[i] : 0;
+        if (!selected || candidateMembers > selectedMembers ||
+            (candidateMembers == selectedMembers && candidate < selected)) {
+            selected = candidate;
+            selectedMembers = candidateMembers;
+        }
+    }
+    return selected;
+}
+
 // A probability in millionths makes the endpoint behavior exact without
 // floating-point differences between ESP32 and CSIM.  Callers deliberately
 // avoid consuming randomness at zero and one.

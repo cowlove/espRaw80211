@@ -80,6 +80,10 @@ int main() {
     assert(chooseScout(candidates,6,20,40)==10);
     assert(chooseScout(candidates,6,20,25)==30); // removed previous candidate
     assert(chooseScout(nullptr,0,20,0)==0);
+    size_t memberCounts[]={2,4,0,4,0,3};
+    assert(chooseLargestKnownScout(candidates,memberCounts,6,20)==10);
+    assert(chooseLargestKnownScout(candidates,memberCounts,6,10)==40);
+    assert(chooseLargestKnownScout(nullptr,nullptr,0,20)==0);
     assert(!includeScout(0,0));
     assert(!includeScout(999999,0));
     assert(includeScout(0,1));

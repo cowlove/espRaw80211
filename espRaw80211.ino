@@ -140,6 +140,8 @@ static_assert(CONTEXT_COUNT == CsimPairwiseData::boardCount,
               "CSIM context count must match generated pairwise data");
 static uint64_t csimMaximumAwakeUsec = 0;
 static uint32_t csimSingletonScoutAggressivenessMillionths = 1000000;
+static uint32_t csimEstablishedScoutIntervalWakes = 2;
+static bool csimEstablishedScoutLargestKnown = false;
 // Application-owned RF world. Each destination selects one environment, so
 // simulated devices can observe different BSSIDs and beacon clocks while the
 // capture HAL remains unaware of the RF model.
@@ -2019,6 +2021,15 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 #endif
     }
 
+
+    uint32_t establishedScoutIntervalWakes() const {
+#ifdef CSIM
+        return csimEstablishedScoutIntervalWakes;
+#else
+        return scoutIntervalWakes;
+#endif
+    }
+
     void dumpBeaconScanSummary() const {
         const uint64_t now = steadyMicros();
         for (const BeaconInfo &info : packetLog) {
@@ -2059,7 +2070,8 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             singletonAggressiveWake = true;
         if ((singletonHome && singletonAggressiveness) ||
             (!singletonHome &&
-             wakeGeneration - spiffsLastScoutRound.read() >= scoutIntervalWakes)) {
+             wakeGeneration - spiffsLastScoutRound.read() >=
+                 establishedScoutIntervalWakes())) {
             uint64_t candidates[packetLogSize];
             uint64_t targetedCandidates[packetLogSize];
             size_t count = 0;
@@ -2129,6 +2141,18 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                             selectedTargeted ? 1U : 0U,
                             (unsigned)targetedScoutExtraTickets);
                 } else if (!eligible) {
+#ifdef CSIM
+                    if (csimEstablishedScoutLargestKnown) {
+                        size_t memberCounts[packetLogSize] = {};
+                        for (size_t i = 0; i < count; ++i)
+                            memberCounts[i] = listenerCount(candidates[i]);
+                        selected = RendezvousPlanner::chooseLargestKnownScout(
+                            candidates, memberCounts, count, home);
+                        out("scout-largest-known selected %012llx members %u",
+                            (unsigned long long)selected,
+                            (unsigned)listenerCount(selected));
+                    } else
+#endif
                     selected = RendezvousPlanner::chooseScout(candidates, count,
                         home, spiffsScoutCursor.read());
                 }
@@ -2956,6 +2980,20 @@ struct PairwiseModelInstaller : public Csim_Module {
                 exit(2);
             }
             SingletonJoinPolicy::proposalDelayCap = (uint32_t)value;
+        } else if (strcmp(*arg, "--established-scout-interval-wakes") == 0) {
+            if (arg + 1 >= end) {
+                fprintf(stderr, "--established-scout-interval-wakes requires 1..100\n");
+                exit(2);
+            }
+            char *tail = nullptr;
+            const long value = strtol(*(++arg), &tail, 10);
+            if (!tail || *tail || value < 1 || value > 100) {
+                fprintf(stderr, "invalid --established-scout-interval-wakes value\n");
+                exit(2);
+            }
+            csimEstablishedScoutIntervalWakes = (uint32_t)value;
+        } else if (strcmp(*arg, "--established-scout-largest-known") == 0) {
+            csimEstablishedScoutLargestKnown = true;
         } else if (strcmp(*arg, "--controlled-43") == 0) {
             csimControlled43 = true;
         } else if (strcmp(*arg, "--controlled-43-credibility") == 0) {
@@ -2992,6 +3030,9 @@ struct PairwiseModelInstaller : public Csim_Module {
                csimSingletonScoutAggressivenessMillionths / 1000000.0);
         printf("csim proposal-delay-cap %u\n",
                SingletonJoinPolicy::proposalDelayCap);
+        printf("csim established-scout interval-wakes %u selection %s\n",
+               csimEstablishedScoutIntervalWakes,
+               csimEstablishedScoutLargestKnown ? "largest-known" : "fair");
         if (csimControlled43)
             printf("csim controlled-43 warmup-rounds %u release-credibility %u\n",
                    csimControlled43WarmupRounds,

@@ -344,6 +344,40 @@ solution to the large-group merge tail.  The next experiment should improve
 established-group scout opportunity/target selection rather than increase
 membership TTL.
 
+The first CSIM scout experiment adds two simulation-only controls:
+
+```sh
+--established-scout-interval-wakes 1
+--established-scout-largest-known
+```
+
+The first changes established groups from one scout every two logical wakes to
+one every wake.  The second retains the production cadence but chooses the
+eligible rival with the largest locally reconstructed membership, using lower
+BSSID as the equal-size tie-break, instead of fair rotation.  Production
+hardware remains fair/every-two-wakes.
+
+In 300 ordinary paired seeds at reception scale 0.60:
+
+- baseline: 300/300, median 1005s, p95 1799s;
+- every-wake fair scouting: 300/300, median 825s, p95 1537s;
+- largest-known targeting: 300/300, median 825s, p95 1424s;
+- both changes: 299/300, median 705s, p95 1197s.
+
+The combined policy is not a candidate: seed 30 remained in a persistent 4/3
+split past the 3600-second limit, despite each individual treatment converging
+that seed.  The interaction repeatedly refreshed proposals and demonstrates
+that independently safe scout changes cannot be assumed safe when combined.
+
+Planned-awake accounting over 30 ordinary seeds also favors target selection.
+Largest-known targeting left awake time per plan effectively unchanged
+(12.68s versus 12.77s baseline) and reduced total planned awake time per seed
+from 940s to 779s because convergence required fewer plans.  Every-wake
+scouting raised awake time per plan to 14.24s, although faster convergence
+reduced total planned awake time slightly to 896s.  Therefore the isolated
+largest-known selector is the strongest next hardware candidate; cadence
+acceleration should remain a separate later experiment.
+
 ### Slice D: passive hardware snapshots (deployed)
 
 Wire the proven capture path into firmware using a fixed-size RAM buffer and
