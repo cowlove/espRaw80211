@@ -1,6 +1,7 @@
 BOARD ?= esp32
 # The generated empirical CSIM model owns the default simulated fleet size.
 CONTEXT_COUNT ?= $(shell sed -n 's/.*boardCount = \([0-9][0-9]*\).*/\1/p' csimPairwiseData.h)
+GIT_VERSION := "$(shell git describe --abbrev=4 --dirty --always --tags)"
 
 ifneq ($(filter esp32 esp32s3,$(BOARD)),)
 CHIP=esp32
@@ -8,7 +9,6 @@ BUILD_MEMORY_TYPE=qio_qspi
 BUILD_EXTRA_FLAGS += -DI2S
 ALIBS=${HOME}/Arduino/libraries
 EXCLUDE_DIRS=${ALIBS}/lvgl|${ALIBS}/LovyanGFX|${ALIBS}/U8g2|${ALIBS}/esp32csim|${ALIBS}/PubSubClient/tests
-GIT_VERSION := "$(shell git describe --abbrev=4 --dirty --always --tags)"
 BUILD_EXTRA_FLAGS += -DGIT_VERSION=\"$(GIT_VERSION)\"
 BUILD_EXTRA_FLAGS += -DESP32CORE_V2
 
@@ -54,7 +54,7 @@ CSIM_BUILD_DIR=./build/csim
 CSIM_OBJS=$(foreach S,$(notdir $(CSIM_SRCS)),$(CSIM_BUILD_DIR)/$(S:.cpp=.o))
 CSIM_INC=$(foreach DIR,$(CSIM_SRC_DIRS),-I${DIR})
 CSIM_CFLAGS=-g -O2 -MMD -fpermissive -DESP32 -DCSIM -DUBUNTU \
-	-DCONTEXT_COUNT=$(CONTEXT_COUNT)
+	-DCONTEXT_COUNT=$(CONTEXT_COUNT) -DGIT_VERSION=\"$(GIT_VERSION)\"
 VPATH=$(sort $(dir $(CSIM_SRCS)))
 
 espRaw80211_csim: ${CSIM_OBJS} ${CSIM_BUILD_DIR}/espRaw80211.o | ${CSIM_BUILD_DIR}

@@ -10,6 +10,10 @@
 #include "appointmentDecisionSnapshot.h"
 #include "rendezvousExecutor.h"
 #include "testSwarmConfig.h"
+
+#ifndef GIT_VERSION
+#define GIT_VERSION "unknown"
+#endif
 #include "csimPairwiseModel.h"
 #ifndef ESP32
 #error Only the ESP32 is supported
@@ -422,6 +426,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     BeaconAssociation associations[associationTableSize] = {};
     uint32_t wakeGeneration = 0;
     uint32_t incarnation = 0;
+    bool buildIdentityLogged = false;
     uint32_t reportBadLength = 0;
     uint16_t reportSequence = 0;
     uint16_t reportTxCount = 0;
@@ -537,6 +542,20 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         clearRendezvousTestState();
     }
 
+    // Emit the build identity once per boot, as part of the final sleep path.
+    // Early CDC/USB output can be lost while the logger is reconnecting, so
+    // this deliberately does not rely on setup() identity output.
+    void emitBuildIdentityBeforeSleep() {
+        if (buildIdentityLogged) return;
+        buildIdentityLogged = true;
+#ifdef CSIM
+        if (csimLegacyDiagnostics)
+            out("firmware-build git %s", GIT_VERSION);
+        else
+#endif
+            out("@b git=%s", GIT_VERSION);
+    }
+
     bool coldResetStartsTestEpoch() {
 #if ARTIFICIAL_TEST_COLD_RESET_CLEARS_STATE
 #ifdef CSIM
@@ -570,6 +589,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             randomValue % (jitterRange + 1) : 0);
         out("TEST EPOCH RESET reason=cold delay-usec=%llu",
             (unsigned long long)delay);
+        emitBuildIdentityBeforeSleep();
         fflush(stdout);
 #ifndef CSIM
         uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
@@ -2222,6 +2242,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         spiffsSleepTime = duration;
         spiffsClaimGeneration = wakeGeneration;
         out("deep sleep %.3f sec timing-recovery", duration / 1000000.0);
+        emitBuildIdentityBeforeSleep();
         dumpBeaconScanSummary();
         fflush(stdout);
 #ifndef CSIM
@@ -2256,6 +2277,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         out("maximum-awake deep sleep after %.3f sec limit %s",
             (now - startUsec) / 1000000.0,
             singletonLimit ? "singleton" : "general");
+        emitBuildIdentityBeforeSleep();
         dumpBeaconScanSummary();
         fflush(stdout);
 #ifndef CSIM
@@ -2303,6 +2325,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             }
         }
         out("deep sleep %.3f sec executor", duration / 1000000.0);
+        emitBuildIdentityBeforeSleep();
         dumpBeaconScanSummary();
         spiffsRoundElapsed = roundClock.remainder + (now-roundClock.last) + duration;
         spiffsSleepTime = duration;
@@ -2332,6 +2355,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         spiffsSleepTime = duration;
         spiffsClaimGeneration = wakeGeneration;
         out("@u h=1 s=%llu", (unsigned long long)duration);
+        emitBuildIdentityBeforeSleep();
         fflush(stdout);
 #ifndef CSIM
         uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
@@ -2389,6 +2413,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             saveClaims(); saveAssociations(); saveOrigins();
             dumpBeaconScanSummary();
             beaconCapture.stop();
+            emitBuildIdentityBeforeSleep();
             esp_sleep_enable_timer_wakeup(1000);
             esp_deep_sleep_start();
             return;
@@ -2607,6 +2632,7 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             saveClaims(); saveAssociations(); saveOrigins();
             dumpBeaconScanSummary();
             beaconCapture.stop();
+            emitBuildIdentityBeforeSleep();
             esp_sleep_enable_timer_wakeup(1000);
             esp_deep_sleep_start();
         }
@@ -2779,6 +2805,7 @@ public:
 #else
     void setup() {
 #endif
+        buildIdentityLogged = false;
 #ifdef CSIM
         CSIM_ASSERT(currentContext == context);
 #endif
