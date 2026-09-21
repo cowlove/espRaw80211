@@ -311,7 +311,10 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     // Policy freshness is expressed in logical wakes, so this production-like
     // cadence change does not silently change membership semantics.
     static constexpr uint64_t defaultRendezvousUsec = 120ULL * 1000000ULL;
-    static constexpr uint32_t scoutIntervalWakes = 2;
+    // Established groups get one scout appointment on every wake.  This is
+    // deliberately separate from the singleton aggressiveness policy: the
+    // large-group merge phase is the latency target for this experiment.
+    static constexpr uint32_t scoutIntervalWakes = 1;
     // Zero preserves fair rotating scouting. Positive values give each fresh
     // rumored-singleton beacon this many additional random-selection tickets.
     static constexpr uint32_t targetedScoutExtraTickets = 0;
