@@ -58,7 +58,7 @@ int main() {
                             str(source_path), '-o', str(binary)], check=True)
             subprocess.run([str(binary)], check=True)
 
-    def test_twenty_board_model_repeats_empirical_matrix(self):
+    def test_twenty_board_model_expands_off_diagonal_links(self):
         project = pathlib.Path(__file__).resolve().parents[1]
         source = r'''
 #define CSIM
@@ -71,9 +71,29 @@ int main() {
     assert(empiricalBoardCount == 7);
     assert(index(firstMac + 19) == 19);
     assert(index(firstMac + 20) == -1);
-    assert(empiricalIndex(19) == 5);
-    assert(packetsPerSecond(19, 18) == packetsPerSecond(5, 4));
-    assert(healthyWindowPercent(14, 15) == healthyWindowPercent(0, 1));
+    for (size_t receiver = 0; receiver < boardCount; ++receiver) {
+        for (size_t sender = 0; sender < boardCount; ++sender) {
+            EmpiricalLink link = empiricalLink(receiver, sender);
+            assert(link.receiver < empiricalBoardCount);
+            assert(link.sender < empiricalBoardCount);
+            if (receiver != sender) assert(link.receiver != link.sender);
+        }
+    }
+
+    // The positive-link graph must be strongly connected; otherwise the
+    // expander itself has manufactured a permanently isolated class.
+    for (size_t start = 0; start < boardCount; ++start) {
+        bool reached[boardCount] = {};
+        reached[start] = true;
+        for (size_t pass = 0; pass < boardCount; ++pass)
+            for (size_t receiver = 0; receiver < boardCount; ++receiver)
+                for (size_t sender = 0; sender < boardCount; ++sender)
+                    if (reached[sender] &&
+                        packetsPerSecond(receiver, sender) > 0 &&
+                        healthyWindowPercent(receiver, sender) > 0)
+                        reached[receiver] = true;
+        for (bool value : reached) assert(value);
+    }
 
     // Logical devices that share an empirical row still retain independent
     // receiver state and packet counters.

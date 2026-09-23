@@ -243,10 +243,12 @@ separate 20-device CSIM binary and run 2,000 seeded repetitions over a
 ./scripts/csim-stress-20.sh
 ```
 
-The 20 logical devices retain independent state and random draws.  Their
-beacon and directed ESP-NOW parameters repeat the measured seven-device model
-with `logical_index % 7`.  The normal seven-device binary and benchmark remain
-unchanged.  This is a failure-finding stress profile, not an expected-100%
+The 20 logical devices retain independent state and random draws.  For fleets
+larger than seven, each logical off-diagonal directed link deterministically
+samples one of the measured 42 off-diagonal cells.  This preserves measured
+directionality, zeros, and value distribution without turning modulo aliases
+into artificial self-links.  The normal seven-device binary uses the original
+7x7 matrix exactly.  This is a failure-finding stress profile, not an expected-100%
 release gate: its repeated sparse/zero empirical links make 20-device
 information propagation substantially harsher than the measured farm.
 Timeout seeds are retained as investigation candidates.  Override options for
@@ -254,6 +256,13 @@ a smoke run, for example:
 
 ```sh
 ./scripts/csim-stress-20.sh --iterations 20
+```
+
+The underlying launcher accepts other fleet sizes without adding another
+matrix or binary target:
+
+```sh
+./scripts/csim-stress.sh --devices 30 --iterations 20
 ```
 
 For migration-policy experiments, `--controlled-43` holds a fixed four/three

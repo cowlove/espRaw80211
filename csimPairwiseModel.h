@@ -37,26 +37,48 @@ inline int index(uint64_t mac) {
         ? static_cast<int>(mac - firstMac) : -1;
 }
 
-inline size_t empiricalIndex(size_t logicalIndex) {
-    return logicalIndex % empiricalBoardCount;
-}
-
-inline float packetsPerSecond(size_t receiver, size_t sender) {
-    return CsimPairwiseData::packetsPerSecond[
-        empiricalIndex(receiver)][empiricalIndex(sender)];
-}
-
-inline float healthyWindowPercent(size_t receiver, size_t sender) {
-    return CsimPairwiseData::healthyWindowPercent[
-        empiricalIndex(receiver)][empiricalIndex(sender)];
-}
-
 inline uint64_t mix(uint64_t value) {
     value ^= value >> 30;
     value *= 0xbf58476d1ce4e5b9ULL;
     value ^= value >> 27;
     value *= 0x94d049bb133111ebULL;
     return value ^ (value >> 31);
+}
+
+struct EmpiricalLink {
+    size_t receiver;
+    size_t sender;
+};
+
+inline EmpiricalLink empiricalLink(size_t receiver, size_t sender) {
+    // Preserve the exact measured 7x7 model for the normal hardware-sized
+    // benchmark.  Larger fleets deterministically sample the 42 measured
+    // directed off-diagonal cells.  Distinct logical devices can therefore
+    // never alias to a measured self-link merely because their indices share
+    // the same residue modulo seven.
+    if (boardCount == empiricalBoardCount)
+        return {receiver, sender};
+    if (receiver == sender) {
+        const size_t empirical = receiver % empiricalBoardCount;
+        return {empirical, empirical};
+    }
+    const uint64_t key = seed ^ (uint64_t(receiver) << 32) ^ sender;
+    const size_t slot = mix(key) %
+        (empiricalBoardCount * (empiricalBoardCount - 1));
+    const size_t empiricalReceiver = slot / (empiricalBoardCount - 1);
+    size_t empiricalSender = slot % (empiricalBoardCount - 1);
+    if (empiricalSender >= empiricalReceiver) ++empiricalSender;
+    return {empiricalReceiver, empiricalSender};
+}
+
+inline float packetsPerSecond(size_t receiver, size_t sender) {
+    const EmpiricalLink link = empiricalLink(receiver, sender);
+    return CsimPairwiseData::packetsPerSecond[link.receiver][link.sender];
+}
+
+inline float healthyWindowPercent(size_t receiver, size_t sender) {
+    const EmpiricalLink link = empiricalLink(receiver, sender);
+    return CsimPairwiseData::healthyWindowPercent[link.receiver][link.sender];
 }
 
 inline uint32_t sample(uint8_t receiver, uint8_t sender, uint32_t window,
