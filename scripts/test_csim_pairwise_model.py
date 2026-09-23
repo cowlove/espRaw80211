@@ -58,6 +58,39 @@ int main() {
                             str(source_path), '-o', str(binary)], check=True)
             subprocess.run([str(binary)], check=True)
 
+    def test_twenty_board_model_repeats_empirical_matrix(self):
+        project = pathlib.Path(__file__).resolve().parents[1]
+        source = r'''
+#define CSIM
+#define CONTEXT_COUNT 20
+#include "csimPairwiseModel.h"
+#include <assert.h>
+int main() {
+    using namespace CsimPairwiseModel;
+    assert(boardCount == 20);
+    assert(empiricalBoardCount == 7);
+    assert(index(firstMac + 19) == 19);
+    assert(index(firstMac + 20) == -1);
+    assert(empiricalIndex(19) == 5);
+    assert(packetsPerSecond(19, 18) == packetsPerSecond(5, 4));
+    assert(healthyWindowPercent(14, 15) == healthyWindowPercent(0, 1));
+
+    // Logical devices that share an empirical row still retain independent
+    // receiver state and packet counters.
+    beginWindow(firstMac, 10);
+    beginWindow(firstMac + 7, 11);
+    assert(states[0].active && states[7].active);
+    assert(states[0].window == 10 && states[7].window == 11);
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = pathlib.Path(directory) / 'model20.cpp'
+            binary = pathlib.Path(directory) / 'model20'
+            source_path.write_text(source)
+            subprocess.run(['g++', '-std=c++17', '-I', str(project),
+                            str(source_path), '-o', str(binary)], check=True)
+            subprocess.run([str(binary)], check=True)
+
 
 if __name__ == '__main__':
     unittest.main()

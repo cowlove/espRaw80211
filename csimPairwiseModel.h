@@ -10,7 +10,13 @@
 // are senders. The same model intentionally applies to home and scout windows.
 namespace CsimPairwiseModel {
 
-static constexpr size_t boardCount = CsimPairwiseData::boardCount;
+static constexpr size_t empiricalBoardCount = CsimPairwiseData::boardCount;
+#ifdef CONTEXT_COUNT
+static constexpr size_t boardCount = CONTEXT_COUNT;
+#else
+static constexpr size_t boardCount = empiricalBoardCount;
+#endif
+static_assert(boardCount > 0, "CSIM fleet must be nonempty");
 static constexpr uint64_t firstMac = 0xddeeff000001ULL;
 static constexpr float nominalPacketsPerSecond = 5.0f;
 // Apply one deliberately conservative scale to both empirical success gates.
@@ -29,6 +35,20 @@ inline ReceiverState states[boardCount] = {};
 inline int index(uint64_t mac) {
     return mac >= firstMac && mac < firstMac + boardCount
         ? static_cast<int>(mac - firstMac) : -1;
+}
+
+inline size_t empiricalIndex(size_t logicalIndex) {
+    return logicalIndex % empiricalBoardCount;
+}
+
+inline float packetsPerSecond(size_t receiver, size_t sender) {
+    return CsimPairwiseData::packetsPerSecond[
+        empiricalIndex(receiver)][empiricalIndex(sender)];
+}
+
+inline float healthyWindowPercent(size_t receiver, size_t sender) {
+    return CsimPairwiseData::healthyWindowPercent[
+        empiricalIndex(receiver)][empiricalIndex(sender)];
 }
 
 inline uint64_t mix(uint64_t value) {
@@ -75,13 +95,12 @@ inline bool drop(uint64_t senderMac, uint64_t receiverMac) {
     // draw applies the measured unconditional packet rate, intentionally
     // making this first model slightly harsher than the hardware observations.
     const float windowSuccess = scaledSuccess(
-        CsimPairwiseData::healthyWindowPercent[receiver][sender] / 100.0f);
+        healthyWindowPercent(receiver, sender) / 100.0f);
     if (sample(receiver, sender, state.window, 0, 1000000) >=
             static_cast<uint32_t>(windowSuccess * 1000000.0f))
         return true;
     const float probability = scaledSuccess(
-        CsimPairwiseData::packetsPerSecond[receiver][sender] /
-        nominalPacketsPerSecond);
+        packetsPerSecond(receiver, sender) / nominalPacketsPerSecond);
     if (probability <= 0) return true;
     if (probability >= 1) return false;
     const uint32_t packet = ++state.packet[sender];

@@ -225,7 +225,7 @@ The convergence marker's `time=` field is the clean-start convergence latency.
 No marker means that seed timed out without converging.
 
 Run the benchmark in parallel using all available processors. It defaults to
-200 seeds, 3,600 simulated seconds, and reception scale 0.60. The benchmark
+300 seeds, 3,600 simulated seconds, and reception scale 0.60. The benchmark
 parses and reports overrides for those values. All other arguments are appended
 verbatim to the generated CSIM command line:
 
@@ -233,6 +233,27 @@ verbatim to the generated CSIM command line:
 ./scripts/csim-benchmark.sh
 ./scripts/csim-benchmark.sh --iterations 1000
 ./scripts/csim-benchmark.sh --iterations 200 --reception-scale 0.40
+```
+
+For a periodic, deliberately expensive scale/liveness stress test, build a
+separate 20-device CSIM binary and run 2,000 seeded repetitions over a
+10-simulated-hour horizon:
+
+```sh
+./scripts/csim-stress-20.sh
+```
+
+The 20 logical devices retain independent state and random draws.  Their
+beacon and directed ESP-NOW parameters repeat the measured seven-device model
+with `logical_index % 7`.  The normal seven-device binary and benchmark remain
+unchanged.  This is a failure-finding stress profile, not an expected-100%
+release gate: its repeated sparse/zero empirical links make 20-device
+information propagation substantially harsher than the measured farm.
+Timeout seeds are retained as investigation candidates.  Override options for
+a smoke run, for example:
+
+```sh
+./scripts/csim-stress-20.sh --iterations 20
 ```
 
 For migration-policy experiments, `--controlled-43` holds a fixed four/three

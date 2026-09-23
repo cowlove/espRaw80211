@@ -50,14 +50,15 @@ CSIM_SRC_DIRS=$(foreach L,$(CSIM_LIBS),${ALIBS}/${L}/src)
 CSIM_SRC_DIRS+=$(foreach L,$(CSIM_LIBS),${ALIBS}/${L})
 CSIM_SRC_DIRS+=$(foreach L,$(CSIM_LIBS),${ALIBS}/${L}/src/csim_include)
 CSIM_SRCS=$(foreach DIR,$(CSIM_SRC_DIRS),$(wildcard $(DIR)/*.cpp))
-CSIM_BUILD_DIR=./build/csim
+CSIM_BINARY ?= espRaw80211_csim
+CSIM_BUILD_DIR=./build/csim-$(CONTEXT_COUNT)
 CSIM_OBJS=$(foreach S,$(notdir $(CSIM_SRCS)),$(CSIM_BUILD_DIR)/$(S:.cpp=.o))
 CSIM_INC=$(foreach DIR,$(CSIM_SRC_DIRS),-I${DIR})
 CSIM_CFLAGS=-g -O2 -MMD -fpermissive -DESP32 -DCSIM -DUBUNTU \
 	-DCONTEXT_COUNT=$(CONTEXT_COUNT) -DGIT_VERSION=\"$(GIT_VERSION)\"
 VPATH=$(sort $(dir $(CSIM_SRCS)))
 
-espRaw80211_csim: ${CSIM_OBJS} ${CSIM_BUILD_DIR}/espRaw80211.o | ${CSIM_BUILD_DIR}
+$(CSIM_BINARY): ${CSIM_OBJS} ${CSIM_BUILD_DIR}/espRaw80211.o | ${CSIM_BUILD_DIR}
 	g++ -g ${CSIM_CFLAGS} ${CSIM_OBJS} ${CSIM_BUILD_DIR}/espRaw80211.o -o $@
 
 ${CSIM_BUILD_DIR}/%.o: %.cpp | ${CSIM_BUILD_DIR}
@@ -77,7 +78,7 @@ clear-state:
 depend: ${CSIM_OBJS} ${CSIM_BUILD_DIR}/espRaw80211.o
 
 clean:
-	rm -rf ${CSIM_BUILD_DIR} espRaw80211_csim
+	rm -rf ${CSIM_BUILD_DIR} $(CSIM_BINARY)
 
 -include ${CSIM_BUILD_DIR}/*.d
 

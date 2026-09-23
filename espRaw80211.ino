@@ -140,8 +140,7 @@ struct RemoteBeaconStats {
 #ifndef CONTEXT_COUNT
 #define CONTEXT_COUNT 4
 #endif
-static_assert(CONTEXT_COUNT == CsimPairwiseData::boardCount,
-              "CSIM context count must match generated pairwise data");
+static_assert(CONTEXT_COUNT > 0, "CSIM context count must be nonempty");
 static uint64_t csimMaximumAwakeUsec = 0;
 static uint32_t csimSingletonScoutAggressivenessMillionths = 1000000;
 static uint32_t csimEstablishedScoutIntervalWakes = 2;
@@ -180,10 +179,13 @@ class BeaconSimulationEnvironment : public Csim_Module {
 public:
     BeaconSimulationEnvironment() {
         for (uint8_t i = 0; i < CONTEXT_COUNT; ++i) {
-            environments[i].count = CsimPairwiseData::beaconCount[i];
+            const size_t empirical =
+                i % CsimPairwiseData::boardCount;
+            environments[i].count =
+                CsimPairwiseData::beaconCount[empirical];
             for (size_t j = 0; j < environments[i].count; ++j) {
                 const CsimPairwiseData::BeaconEnvironment &source =
-                    CsimPairwiseData::beacons[i][j];
+                    CsimPairwiseData::beacons[empirical][j];
                 const uint64_t hash = CsimPairwiseModel::mix(source.bssid);
                 environments[i].beacons[j] = {
                     source.bssid, source.rssi, source.rssiVariation,
@@ -325,7 +327,14 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
     // ARTIFICIAL test oracle, not knowledge available to a real deployment.
     // Counts unlogged boards too; never derive this from USB connections.
     // Reset after ten qualified logical rounds, then a three-round delay.
-    static constexpr size_t testClusterSize = ARTIFICIAL_TEST_SWARM_BOARD_COUNT;
+#ifdef CSIM
+    // Stress fleets may exceed the seven-device hardware oracle.  Global
+    // convergence and qualification must cover every simulated context.
+    static constexpr size_t testClusterSize = CONTEXT_COUNT;
+#else
+    static constexpr size_t testClusterSize =
+        ARTIFICIAL_TEST_SWARM_BOARD_COUNT;
+#endif
     SPIFFSVariable<uint32_t> spiffsTestSwarmCount{"/testSwarmCount", 0};
     static constexpr int testConsensusCyclesToCommit = 10;
     static constexpr int testResetDelayCycles = 3;

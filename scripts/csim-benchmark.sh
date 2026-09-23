@@ -8,7 +8,7 @@ usage() {
     echo "usage: $0 [--iterations N] [--seconds N] [--reception-scale N] [csim arguments...]" >&2
 }
 
-iterations=200
+iterations=300
 timeout_seconds=3600
 reception_scale=0.60
 csim_arguments=()

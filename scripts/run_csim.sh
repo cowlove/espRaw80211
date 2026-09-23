@@ -3,7 +3,10 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 project_dir=$(cd -- "$script_dir/.." && pwd)
-csim_binary="$project_dir/espRaw80211_csim"
+csim_binary=${CSIM_BINARY:-$project_dir/espRaw80211_csim}
+if [[ $csim_binary != /* ]]; then
+    csim_binary="$project_dir/$csim_binary"
+fi
 
 if [[ ! -x "$csim_binary" ]]; then
     echo "CSIM binary not found; run: make BOARD=csim espRaw80211_csim" >&2
