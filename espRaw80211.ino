@@ -1409,10 +1409,20 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
             spiffsHomeCredibility.read() : 0;
         const uint64_t pending = spiffsProposalBeacon.read();
         if (pending == targetBssid && spiffsProposalHome.read() == homeBssid) {
+            spiffsProposalMembers = (uint32_t)targetMembers;
+            if (int32_t(wakeGeneration-spiffsProposalActRound.read()) >= 0) {
+                recordDecision(decisionSnapshot,
+                    AppointmentDecisionSnapshot::Action::CommitProposal,
+                    source);
+                out("migration-proposal committed target %012llx target-snapshot %u home-members %u credibility %u reason target-confirmed",
+                    (unsigned long long)targetBssid, (unsigned)targetMembers,
+                    (unsigned)homeMembers, credibility);
+                commitHome(targetBssid);
+                return;
+            }
             recordDecision(decisionSnapshot,
                 AppointmentDecisionSnapshot::Action::RefreshProposal,
                 source);
-            spiffsProposalMembers = (uint32_t)targetMembers;
             out("migration-proposal refreshed target %012llx target-members %u home-members %u act-round %u",
                 (unsigned long long)targetBssid, (unsigned)targetMembers,
                 (unsigned)homeMembers, spiffsProposalActRound.read());

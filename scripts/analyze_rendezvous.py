@@ -417,16 +417,23 @@ def epoch_recovery_events(datasets, required: int, marker_skew: float = 15,
                 observations.append((cycle.wall, name, cycle.home))
     markers.sort()
     observations.sort()
+    # Cluster by host time rather than treating the marker stream as a strict
+    # board-by-board round-robin.  A delayed/duplicated marker from one board
+    # can otherwise discard an otherwise complete wave before the final board
+    # arrives.  Keep the latest marker for a board inside each time cluster;
+    # the wave boundary is still defined by the cluster's first/last marker.
     waves = []
-    candidate = {}
+    cluster = {}
+    cluster_start = None
     for wall, name in markers:
-        if (candidate and (wall - min(candidate.values()) > marker_skew or
-                           name in candidate)):
-            candidate = {}
-        candidate[name] = wall
-        if len(candidate) == required and set(candidate) == board_names:
-            waves.append(dict(candidate))
-            candidate = {}
+        if cluster_start is None or wall - cluster_start > marker_skew:
+            if set(cluster) == board_names:
+                waves.append(dict(cluster))
+            cluster = {}
+            cluster_start = wall
+        cluster[name] = wall
+    if set(cluster) == board_names:
+        waves.append(dict(cluster))
 
     results = []
     wave_starts = [min(wave.values()) for wave in waves]

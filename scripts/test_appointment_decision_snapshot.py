@@ -51,7 +51,11 @@ int main() {
     Snapshot refreshed = observed(3, 20, 4, 30);
     refreshed.pendingBssid = 30;
     refreshed.pendingHome = 20;
+    refreshed.pendingActRound = 12;
+    refreshed.wakeGeneration = 11;
     assert(replay(refreshed) == Action::RefreshProposal);
+    refreshed.wakeGeneration = 12;
+    assert(replay(refreshed) == Action::CommitProposal);
 
     Snapshot weaker = observed(3, 20, 4, 40);
     weaker.pendingBssid = 30;

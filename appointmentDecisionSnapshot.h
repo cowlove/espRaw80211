@@ -92,7 +92,8 @@ inline Action replay(const Snapshot &snapshot) {
             Action::CancelNotPreferred : Action::RejectNotPreferred;
     if (snapshot.pendingBssid == snapshot.targetBssid &&
         snapshot.pendingHome == snapshot.homeBssid)
-        return Action::RefreshProposal;
+        return int32_t(snapshot.wakeGeneration - snapshot.pendingActRound) >= 0 ?
+            Action::CommitProposal : Action::RefreshProposal;
     if (snapshot.pendingBssid &&
         !groupPreferred(snapshot.targetMembers, snapshot.targetBssid,
                         snapshot.pendingMembers, snapshot.pendingBssid))
