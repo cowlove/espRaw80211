@@ -265,6 +265,49 @@ matrix or binary target:
 ./scripts/csim-stress.sh --devices 30 --iterations 20
 ```
 
+### Large-fleet limitation (simulation stress only)
+
+A 2026-09-23 smoke sweep used 10 fixed seeds per size, the expanded measured
+RF model, a 36,000-second simulated horizon, and the normal reception scale of
+0.60.  It is intentionally too small to estimate real-world capacity, but it
+locates the simulation's qualitative scaling cliff:
+
+| Devices | Converged | Median | Timeouts |
+|--------:|----------:|-------:|---------:|
+| 7 | 10/10 | 705 s | 0 |
+| 8 | 10/10 | 821 s | 0 |
+| 9 | 10/10 | 765 s | 0 |
+| 10 | 10/10 | 940 s | 0 |
+| 11 | 9/10 | 828 s | 1 |
+| 12 | 9/10 | 1,057 s | 1 |
+| 13 | 10/10 | 1,061 s | 0 |
+| 14 | 9/10 | 1,074 s | 1 |
+| 15 | 9/10 | 2,977 s | 1 |
+| 16 | 7/10 | 2,154 s | 3 |
+| 17 | 8/10 | 11,683 s | 2 |
+| 18 | 8/10 | 10,730 s | 2 |
+| 19 | 10/10 | 11,395 s | 0 |
+| 20 | 6/10 | 1,960 s | 4 |
+
+The non-monotonic rows are expected from only ten seeds and a separately
+expanded deterministic topology at each size.  The useful signal is the broad
+shape: 7--10 devices were consistently quick, rare ten-hour failures began at
+11, the long tail became prominent around 12--15, and 16--20 was unreliable.
+This is not a supported-fleet threshold.  The production application targets
+small swarms (normally fewer than ten), and the expanded RF graph is a
+failure-finding model rather than a measured large deployment.
+
+To distinguish packet loss from protocol scaling, the same ten 20-device
+seeds were also run with `--reception-scale 100`.  This saturates every
+non-zero empirical link at 100% delivery while preserving empirical zero
+links.  Convergence improved from 6/10 to 9/10, but one seed still timed out.
+Packet loss is therefore an important amplifier, not the complete cause.  At
+larger fleet sizes, three association rows per report and six-wake freshness
+must disseminate evidence for many more origins; that report-bandwidth and
+freshness pressure remains visible even on an otherwise near-perfect RF
+graph.  This limitation is documented rather than tuned because large-swarm
+operation is outside the intended deployment scope.
+
 For migration-policy experiments, `--controlled-43` holds a fixed four/three
 home split while normal exchanges mature the evidence tables.  After every
 board completes the configured warm-up rounds, CSIM seeds a common home
