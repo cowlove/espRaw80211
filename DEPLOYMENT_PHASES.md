@@ -7,9 +7,9 @@ first post-deployment records; those boundaries are approximate.
 
 ## Current limitation
 
-`bd189b1` adds one `@b git=<commit>` record per boot, but it was intentionally
-**not deployed**. Older device logs therefore cannot be unambiguously labeled
-by Git commit. The supervisor log is clock-only and spans multiple days.
+Older device logs before the Git-identity rollout cannot be unambiguously
+labeled by Git commit. Newer firmware emits one `@b git=<commit>` record per
+boot, but the supervisor log itself remains clock-only and spans multiple days.
 
 ## Phase ledger
 
@@ -23,6 +23,8 @@ by Git commit. The supervisor log is clock-only and spans multiple days.
 | Proposal-delay cap 2 | `7562a9c` | Sep 17 12:34 | Explicit seven-board deployment/hash verification | high |
 | Largest-known established scouting | `e6c1069` | Sep 19 11:38 | Explicit seven-board deployment/hash verification; later phase analyses used this boundary | high |
 | Git identity marker, source only | `bd189b1` | Sep 19 17:09 | Tested and pushed; explicitly **not flashed** | certain: not deployed |
+| Fresh-confirmation proposal commit | `9d7b4b6` | Sep 23 13:54 | Explicit seven-board deployment; all boards emitted `@b git=9d7b` | high |
+| Eight-board cohort (adds Miner6 M2) | `01ca386` | Sep 25 13:05 | Five local plus three Miner6 uploads hash-verified; all emitted `@b git=01ca` | high |
 
 Analyzer/docs/CSIM-only commits between these checkpoints are not firmware
 treatment changes unless a deployment is explicitly recorded. Equal-size tie,
@@ -32,13 +34,13 @@ from Git time alone.
 
 ## Filtering rules
 
-1. Prefer `@b git=` markers after a future deployment includes the identity
-   change.
+1. Prefer `@b git=` markers for deployments at or after `9d7b4b6`.
 2. For older phases, use deployment time plus the first subsequent
    `TEST EPOCH RESET`/cold-boot marker on each board. Exclude an ambiguous
    transition epoch caused by logger restart or flash reset.
-3. Use supervisor reset waves only when all seven acknowledgments are present;
-   exclude `epoch-invalid` epochs.
+3. Use supervisor reset waves only when every configured cohort board
+   acknowledges: seven before `01ca386`, eight from `01ca386` onward. Exclude
+   `epoch-invalid` epochs.
 4. Keep F+/F−, time-of-day, and foreign-board presence as covariates; do not
    attribute their effects to firmware without overlap.
 5. For the cap campaign, cap 3 runs from its deployment boundary to the cap-2
@@ -53,9 +55,9 @@ from Git time alone.
   earlier count mixed clock-only supervisor history with older phases. Recompute
   it using this ledger and reset/boot evidence.
 
-## Next data-quality boundary
+## Current data-quality boundary
 
-Deploy the already-tested `bd189b1` marker (or rebase its small change onto the
-current firmware) at a deliberate test boundary, with log rotation or a
-coordinated reset recorded as the start of the new phase. Do not disturb the
-current run solely to obtain another performance point.
+The `01ca386` deployment is a deliberate new phase: the controlled cohort grew
+from seven to eight boards and all eight logs contain the commit marker. Do not
+compare its convergence distribution directly with seven-board phases without
+treating cohort size as a changed condition.

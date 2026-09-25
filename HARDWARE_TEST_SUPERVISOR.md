@@ -29,10 +29,10 @@ their first scans. Deep-sleep wakes do not clear state or emit another marker.
 
 ## Supervisor
 
-`scripts/test_farm_supervisor.py` reads the existing five local and two Miner6
-logs. It requires fresh unanimous home observations for a sustained interval,
-then creates all seven request files concurrently. It will not re-arm until all
-seven logs contain a new epoch marker.
+`scripts/test_farm_supervisor.py` reads the existing five local and three
+Miner6 logs. It requires fresh unanimous home observations for a sustained
+interval, then creates all eight request files concurrently. It will not
+re-arm until all eight logs contain a new epoch marker.
 
 The supervisor does not manage `screen`, open serial ports, or create an event
 log. Device logs remain the source of truth. Its stdout is diagnostic only.
