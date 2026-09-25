@@ -3,7 +3,7 @@
 ## Artificial test swarm size versus USB count
 
 `testSwarmConfig.h` is the single source for `ARTIFICIAL_TEST_SWARM_BOARD_COUNT`
-(currently 7). Firmware's test reset qualification and the offline analyzer use
+(currently 8). Firmware's test reset qualification and the offline analyzer use
 it. Count every participating board, including boards without USB/logging.
 For example, nine participating boards with only five USB loggers means set 9,
 not 5. USB discovery, flashing targets, and simulator context count remain

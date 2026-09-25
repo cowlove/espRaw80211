@@ -1508,7 +1508,7 @@ def main() -> int:
             data = read_local_tail(path, args.tail_bytes)
         raw.append((f'local usb{i}', data))
     if not args.local_only:
-        for i in range(2):
+        for i in range(3):
             data = read_remote(args.remote_host,
                                f'{args.remote_dir}/cat.usb{i}.out', args.tail_bytes)
             raw.append((f'miner6 usb{i}', data))

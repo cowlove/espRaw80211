@@ -234,7 +234,7 @@ def main():
                         help='foreign-peer evidence age (default: one cycle + 60s)')
     parser.add_argument('--ack-timeout-seconds', type=float, default=180)
     parser.add_argument('--local-boards', default='0,1,2,3,4')
-    parser.add_argument('--remote-boards', default='0,1')
+    parser.add_argument('--remote-boards', default='0,1,2')
     parser.add_argument('--log-file', type=Path, default=DEFAULT_STATUS_LOG,
                         help=f'append status lines here (default: {DEFAULT_STATUS_LOG})')
     parser.add_argument('--dry-run', action='store_true')
