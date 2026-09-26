@@ -25,6 +25,7 @@ boot, but the supervisor log itself remains clock-only and spans multiple days.
 | Git identity marker, source only | `bd189b1` | Sep 19 17:09 | Tested and pushed; explicitly **not flashed** | certain: not deployed |
 | Fresh-confirmation proposal commit | `9d7b4b6` | Sep 23 13:54 | Explicit seven-board deployment; all boards emitted `@b git=9d7b` | high |
 | Eight-board cohort (adds Miner6 M2) | `01ca386` | Sep 25 13:05 | Five local plus three Miner6 uploads hash-verified; all emitted `@b git=01ca` | high |
+| Canonical initial BSSID hardware trial | `648006b` | Sep 26 ~11:00 | Eight uploads hash-verified by 11:01:35 PDT; supervisor paused during flashing and resumed afterward | high |
 
 Analyzer/docs/CSIM-only commits between these checkpoints are not firmware
 treatment changes unless a deployment is explicitly recorded. Equal-size tie,
