@@ -235,6 +235,12 @@ verbatim to the generated CSIM command line:
 ./scripts/csim-benchmark.sh --iterations 200 --reception-scale 0.40
 ```
 
+An opt-in startup-only experiment chooses the lowest locally eligible BSSID:
+`./scripts/csim-benchmark.sh --canonical-startup`. Default randomized startup
+and hardware are unchanged. See [the two-stage deterministic rendezvous
+proposal](DETERMINISTIC_RENDEZVOUS_PROPOSAL.md) for design, limitations, cadence
+settings, and comparison results.
+
 For a periodic, deliberately expensive scale/liveness stress test, build a
 separate 20-device CSIM binary and run 2,000 seeded repetitions over a
 10-simulated-hour horizon:

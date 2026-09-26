@@ -143,6 +143,7 @@ struct RemoteBeaconStats {
 static_assert(CONTEXT_COUNT > 0, "CSIM context count must be nonempty");
 static uint64_t csimMaximumAwakeUsec = 0;
 static uint32_t csimSingletonScoutAggressivenessMillionths = 1000000;
+static bool csimCanonicalStartup = false;
 static uint32_t csimEstablishedScoutIntervalWakes = 2;
 // Match production by default. --established-scout-fair preserves the old
 // selector for paired baseline experiments.
@@ -2746,6 +2747,19 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
 #else
         randomValue = esp_random();
 #endif
+#ifdef CSIM
+        if (csimCanonicalStartup) {
+            // Rank ALL locally eligible beacons, not the RSSI-sorted top six.
+            // Consume the usual startup draw above in both experiment arms.
+            int selected = candidates[0];
+            for (size_t i = 1; i < count; ++i)
+                if (packetLog[candidates[i]].ssid < packetLog[selected].ssid)
+                    selected = candidates[i];
+            out("startup-canonical candidates %u selected beacon %012llx",
+                (unsigned)count, (unsigned long long)packetLog[selected].ssid);
+            return selected;
+        }
+#endif
         out("startup-random candidates %d top %d", (int)count,
             (int)topCount);
         for (size_t i = 0; i < topCount; ++i)
@@ -3056,6 +3070,8 @@ struct PairwiseModelInstaller : public Csim_Module {
             csimEstablishedScoutLargestKnown = true;
         } else if (strcmp(*arg, "--established-scout-fair") == 0) {
             csimEstablishedScoutLargestKnown = false;
+        } else if (strcmp(*arg, "--canonical-startup") == 0) {
+            csimCanonicalStartup = true;
         } else if (strcmp(*arg, "--controlled-43") == 0) {
             csimControlled43 = true;
         } else if (strcmp(*arg, "--controlled-43-credibility") == 0) {
@@ -3086,6 +3102,8 @@ struct PairwiseModelInstaller : public Csim_Module {
     }
 
     void setup() override {
+        printf("csim startup-selection %s\n",
+               csimCanonicalStartup ? "lowest-eligible-bssid" : "random-top-six");
         printf("csim reception-scale %.6g\n",
                CsimPairwiseModel::receptionScale);
         printf("csim singleton-scout-aggressiveness %.6f\n",
