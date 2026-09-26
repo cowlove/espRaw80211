@@ -16,3 +16,10 @@ static_assert(ARTIFICIAL_TEST_SWARM_BOARD_COUNT > 0, "Test swarm must be nonempt
 #define ARTIFICIAL_TEST_COLD_RESET_CLEARS_STATE 1
 #define ARTIFICIAL_TEST_COLD_RESET_MIN_SLEEP_SECONDS 60
 #define ARTIFICIAL_TEST_COLD_RESET_JITTER_SECONDS 60
+
+// Hardware startup trial: 1 chooses the lowest locally eligible BSSID;
+// 0 restores randomized top-six startup for worst-case fragmentation tests.
+// CSIM remains randomized by default; use --canonical-startup explicitly.
+#ifndef ARTIFICIAL_TEST_CANONICAL_STARTUP
+#define ARTIFICIAL_TEST_CANONICAL_STARTUP 1
+#endif

@@ -2748,7 +2748,11 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
         randomValue = esp_random();
 #endif
 #ifdef CSIM
-        if (csimCanonicalStartup) {
+        const bool canonicalStartup = csimCanonicalStartup;
+#else
+        const bool canonicalStartup = ARTIFICIAL_TEST_CANONICAL_STARTUP;
+#endif
+        if (canonicalStartup) {
             // Rank ALL locally eligible beacons, not the RSSI-sorted top six.
             // Consume the usual startup draw above in both experiment arms.
             int selected = candidates[0];
@@ -2759,7 +2763,6 @@ class BeaconRendezvousContext : public BeaconRendezvousContextBase {
                 (unsigned)count, (unsigned long long)packetLog[selected].ssid);
             return selected;
         }
-#endif
         out("startup-random candidates %d top %d", (int)count,
             (int)topCount);
         for (size_t i = 0; i < topCount; ++i)

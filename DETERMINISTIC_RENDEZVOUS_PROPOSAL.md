@@ -110,6 +110,24 @@ one-BSSID objective requires a different model, such as bridging/multiple homes.
 
 ## Results
 
+### Hardware smoke trial authorized 2026-09-26
+
+Stage 1 is now enabled for hardware through
+`ARTIFICIAL_TEST_CANONICAL_STARTUP=1` in `testSwarmConfig.h`. Setting it to zero
+and rebuilding restores randomized top-six startup. CSIM still defaults to
+randomized startup and requires `--canonical-startup` for the treatment.
+Both environments execute the same selector. Earlier CSIM-only statements
+above describe the initial experiment, before this hardware promotion.
+
+Deploy to L0–L4 and M0–M2 only; leave the foreign ESP32-S3 unchanged. Keep the
+60–120-second stagger, eight-board oracle, every-wake scouting, proposal delay,
+and merge policy unchanged. Exclude the flashing transition epoch. Inspect
+`startup-canonical` and `@b git=` records from every board, then compare clean
+8/8 supervisor epochs, stability through sustain, and timing-recovery activity.
+The prior hardware rollback reference is `01ca386`. Stage 2 remains unimplemented.
+
+### CSIM comparisons
+
 2026-09-26: seeds 1–300 in each arm, RF scale 0.60, 3,600-second horizon.
 Latency statistics include successes only. Cold-start stagger is included.
 
